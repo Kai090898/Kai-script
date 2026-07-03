@@ -171,22 +171,61 @@ tpTab.Parent = sidebar
 
 Instance.new("UICorner", tpTab).CornerRadius = UDim.new(0,8)
 
+local statTab = Instance.new("TextButton")
+statTab.Size = UDim2.new(1,-20,0,40)
+statTab.Position = UDim2.new(0,10,0,58)
+statTab.Text = "⚡ 屬性"
+statTab.TextSize = 18
+statTab.TextColor3 = Color3.fromRGB(80,255,120)
+statTab.BackgroundColor3 = Color3.fromRGB(30,30,30)
+statTab.Parent = sidebar
+
+Instance.new("UICorner", statTab).CornerRadius = UDim.new(0,8)
+
 -- =====================
--- 📦 RIGHT CONTENT（可滑動）
+-- 📦 RIGHT CONTENT（可滑動，分頁）
 -- =====================
 local content = Instance.new("ScrollingFrame")
+content.Name = "TPPage"
 content.Size = UDim2.new(1,-140,1,0)
 content.Position = UDim2.new(0,140,0,0)
 content.BackgroundTransparency = 1
 content.ScrollBarThickness = 6
 content.AutomaticCanvasSize = Enum.AutomaticSize.Y
 content.CanvasSize = UDim2.new(0,0,0,0)
+content.Visible = true
 content.Parent = body
 
 local list = Instance.new("UIListLayout")
 list.Padding = UDim.new(0,8)
 list.SortOrder = Enum.SortOrder.LayoutOrder
 list.Parent = content
+
+local statPage = Instance.new("ScrollingFrame")
+statPage.Name = "StatPage"
+statPage.Size = UDim2.new(1,-140,1,0)
+statPage.Position = UDim2.new(0,140,0,0)
+statPage.BackgroundTransparency = 1
+statPage.ScrollBarThickness = 6
+statPage.AutomaticCanvasSize = Enum.AutomaticSize.Y
+statPage.CanvasSize = UDim2.new(0,0,0,0)
+statPage.Visible = false
+statPage.Parent = body
+
+local statList = Instance.new("UIListLayout")
+statList.Padding = UDim.new(0,8)
+statList.SortOrder = Enum.SortOrder.LayoutOrder
+statList.Parent = statPage
+
+tpTab.MouseButton1Click:Connect(function()
+	content.Visible = true
+	statPage.Visible = false
+end)
+
+statTab.MouseButton1Click:Connect(function()
+	content.Visible = false
+	statPage.Visible = true
+end)
 
 -- =====================
 -- 📍 TP CARD
@@ -236,3 +275,130 @@ createTP("果實島", Vector3.new(-423,108,-20))
 createTP("大砲島", Vector3.new(244,34,184))
 createTP("彩虹雲小島", Vector3.new(-125,-5,122))
 createTP("紅門", Vector3.new(-1208,328,4))
+
+-- =====================
+-- ⚡ 速度 / 跳躍 滑桿
+-- =====================
+local currentSpeed = 16
+local currentJump = 50
+
+local function getHumanoid()
+	local char = player.Character or player.CharacterAdded:Wait()
+	return char:WaitForChild("Humanoid")
+end
+
+local function applyStats()
+	local ok, hum = pcall(getHumanoid)
+	if ok and hum then
+		hum.WalkSpeed = currentSpeed
+		hum.UseJumpPower = true
+		hum.JumpPower = currentJump
+	end
+end
+
+-- 每次重生後重新套用（不然死亡重生會被系統重設回預設值）
+player.CharacterAdded:Connect(function(char)
+	local hum = char:WaitForChild("Humanoid")
+	hum.WalkSpeed = currentSpeed
+	hum.UseJumpPower = true
+	hum.JumpPower = currentJump
+end)
+
+local function createSlider(name, min, max, default, onChange)
+	local container = Instance.new("Frame")
+	container.Size = UDim2.new(1,-20,0,60)
+	container.BackgroundColor3 = Color3.fromRGB(28,28,28)
+	container.Parent = statPage
+	Instance.new("UICorner", container).CornerRadius = UDim.new(0,8)
+
+	local label = Instance.new("TextLabel")
+	label.Text = name .. ": " .. tostring(default)
+	label.Size = UDim2.new(1,-20,0,25)
+	label.Position = UDim2.new(0,10,0,5)
+	label.BackgroundTransparency = 1
+	label.TextColor3 = Color3.fromRGB(255,255,255)
+	label.TextXAlignment = Enum.TextXAlignment.Left
+	label.TextSize = 16
+	label.Parent = container
+
+	local track = Instance.new("Frame")
+	track.Size = UDim2.new(1,-20,0,8)
+	track.Position = UDim2.new(0,10,0,38)
+	track.BackgroundColor3 = Color3.fromRGB(45,45,45)
+	track.Parent = container
+	Instance.new("UICorner", track).CornerRadius = UDim.new(1,0)
+
+	local startFrac = (default - min) / (max - min)
+
+	local fill = Instance.new("Frame")
+	fill.BackgroundColor3 = Color3.fromRGB(80,255,120)
+	fill.Size = UDim2.new(startFrac,0,1,0)
+	fill.Parent = track
+	Instance.new("UICorner", fill).CornerRadius = UDim.new(1,0)
+
+	local knob = Instance.new("TextButton")
+	knob.Text = ""
+	knob.AutoButtonColor = false
+	knob.Size = UDim2.new(0,16,0,16)
+	knob.AnchorPoint = Vector2.new(0.5,0.5)
+	knob.Position = UDim2.new(startFrac,0,0.5,0)
+	knob.BackgroundColor3 = Color3.fromRGB(255,255,255)
+	knob.ZIndex = 2
+	knob.Parent = track
+	Instance.new("UICorner", knob).CornerRadius = UDim.new(1,0)
+
+	local draggingKnob = false
+
+	local function setFromX(xPos)
+		local relative = math.clamp((xPos - track.AbsolutePosition.X) / track.AbsoluteSize.X, 0, 1)
+		local value = math.floor(min + (max - min) * relative + 0.5)
+		fill.Size = UDim2.new(relative,0,1,0)
+		knob.Position = UDim2.new(relative,0,0.5,0)
+		label.Text = name .. ": " .. tostring(value)
+		onChange(value)
+	end
+
+	knob.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.Touch then
+			draggingKnob = true
+		end
+	end)
+
+	track.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.Touch then
+			setFromX(input.Position.X)
+			draggingKnob = true
+		end
+	end)
+
+	UIS.InputChanged:Connect(function(input)
+		if draggingKnob and (input.UserInputType == Enum.UserInputType.MouseMovement
+			or input.UserInputType == Enum.UserInputType.Touch) then
+			setFromX(input.Position.X)
+		end
+	end)
+
+	UIS.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.Touch then
+			draggingKnob = false
+		end
+	end)
+
+	return container
+end
+
+createSlider("移動速度 WalkSpeed", 16, 300, currentSpeed, function(v)
+	currentSpeed = v
+	applyStats()
+end)
+
+createSlider("跳躍力 JumpPower", 50, 300, currentJump, function(v)
+	currentJump = v
+	applyStats()
+end)
+
+-- 進入遊戲先套用一次
+applyStats()
