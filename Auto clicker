@@ -1,0 +1,151 @@
+local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+
+local UIS = game:GetService("UserInputService")
+local VIM = game:GetService("VirtualInputManager")
+
+local enabled = false
+local shortcutEnabled = false  -- 雙擊捷徑預設關閉
+local unit = "毫秒"   -- "毫秒" 或 "秒"
+local value = 100     -- 使用者輸入的數字
+local interval = 0.1  -- 實際間隔（秒）
+
+local lastAutoClick = 0
+local lastTap = 0
+local DOUBLE_TAP_TIME = 0.4
+
+local function updateInterval()
+    if unit == "秒" then
+        interval = value
+    else
+        interval = value / 1000
+    end
+    if interval < 0.001 then interval = 0.001 end
+end
+
+local function getCenter()
+    local size = workspace.CurrentCamera.ViewportSize
+    return size.X / 2, size.Y / 2
+end
+
+local function click()
+    local x, y = getCenter()
+    lastAutoClick = tick()
+    local ok = pcall(function()
+        VIM:SendMouseButtonEvent(x, y, 0, true, game, 0)
+        VIM:SendMouseButtonEvent(x, y, 0, false, game, 0)
+    end)
+    if not ok and mousemoveabs and mouse1click then
+        mousemoveabs(x, y)
+        mouse1click()
+    end
+end
+
+task.spawn(function()
+    while true do
+        if enabled then
+            pcall(click)
+            task.wait(interval)
+        else
+            task.wait(0.1)
+        end
+    end
+end)
+
+local Window = Rayfield:CreateWindow({
+    Name = "自動點擊器",
+    LoadingTitle = "自動點擊器",
+    LoadingSubtitle = "Rayfield",
+    ConfigurationSaving = {
+        Enabled = false,
+    },
+    KeySystem = false
+})
+
+local Tab = Window:CreateTab("主要", 4483362458)
+
+local Toggle = Tab:CreateToggle({
+    Name = "啟用自動點擊（點螢幕正中央）",
+    CurrentValue = false,
+    Flag = "AutoClickToggle",
+    Callback = function(v)
+        enabled = v
+    end,
+})
+
+Tab:CreateToggle({
+    Name = "啟用雙擊開關捷徑",
+    CurrentValue = false,
+    Flag = "ShortcutToggle",
+    Callback = function(v)
+        shortcutEnabled = v
+        lastTap = 0
+    end,
+})
+
+Tab:CreateDropdown({
+    Name = "時間單位",
+    Options = {"毫秒", "秒"},
+    CurrentOption = {"毫秒"},
+    MultipleOptions = false,
+    Flag = "AutoClickUnit",
+    Callback = function(opt)
+        unit = type(opt) == "table" and opt[1] or opt
+        updateInterval()
+    end,
+})
+
+Tab:CreateInput({
+    Name = "點擊間隔（輸入數字）",
+    PlaceholderText = "例如 100 或 0.5",
+    RemoveTextAfterFocusLost = false,
+    Callback = function(text)
+        local n = tonumber(text)
+        if n and n > 0 then
+            value = n
+            updateInterval()
+            Rayfield:Notify({
+                Title = "已設定",
+                Content = "每 " .. value .. " " .. unit .. "點擊一次",
+                Duration = 3,
+            })
+        else
+            Rayfield:Notify({
+                Title = "輸入錯誤",
+                Content = "請輸入大於 0 的數字",
+                Duration = 3,
+            })
+        end
+    end,
+})
+
+-- 快速點擊兩下螢幕 = 開關自動點擊（需先開啟「啟用雙擊開關捷徑」）
+UIS.InputBegan:Connect(function(input)
+    if not shortcutEnabled then
+        return
+    end
+
+    local t = input.UserInputType
+    if t ~= Enum.UserInputType.MouseButton1 and t ~= Enum.UserInputType.Touch then
+        return
+    end
+
+    local now = tick()
+    if now - lastAutoClick < 0.05 then
+        return
+    end
+
+    if now - lastTap <= DOUBLE_TAP_TIME then
+        lastTap = 0
+        Toggle:Set(not enabled)
+    else
+        lastTap = now
+    end
+end)
+
+updateInterval()
+
+Rayfield:Notify({
+    Title = "載入完成",
+    Content = "請先在介面中開啟需要的功能",
+    Duration = 4,
+})
