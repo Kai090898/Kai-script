@@ -758,6 +758,17 @@ local function setMenuVisible(v)
     end)
 end
 
+-- 切換選單（會先跟 Rayfield 目前的顯示狀態同步，避免用 Rayfield 自己的 X 關掉後狀態對不上）
+local function toggleMenu()
+    local ok, vis = pcall(function()
+        return Rayfield:IsVisible()
+    end)
+    if ok and type(vis) == "boolean" then
+        menuVisible = vis
+    end
+    setMenuVisible(not menuVisible)
+end
+
 local function ensureFloatButton()
     if floatGui and floatGui.Parent then
         return
@@ -800,7 +811,7 @@ local function ensureFloatButton()
                 if input.UserInputState == Enum.UserInputState.End then
                     dragging = false
                     if not moved then
-                        setMenuVisible(not menuVisible)
+                        toggleMenu()
                     end
                 end
             end)
@@ -835,8 +846,91 @@ local Window = Rayfield:CreateWindow({
     ConfigurationSaving = {
         Enabled = false,
     },
-    KeySystem = false
+    KeySystem = false,
+    Theme = {
+        TextColor = Color3.fromRGB(240, 240, 240),
+
+        Background = Color3.fromRGB(0, 0, 0),
+        Topbar = Color3.fromRGB(10, 10, 10),
+        Shadow = Color3.fromRGB(0, 0, 0),
+
+        NotificationBackground = Color3.fromRGB(10, 10, 10),
+        NotificationActionsBackground = Color3.fromRGB(230, 230, 230),
+
+        TabBackground = Color3.fromRGB(20, 20, 20),
+        TabStroke = Color3.fromRGB(40, 40, 40),
+        TabBackgroundSelected = Color3.fromRGB(45, 45, 45),
+        TabTextColor = Color3.fromRGB(200, 200, 200),
+        SelectedTabTextColor = Color3.fromRGB(255, 255, 255),
+
+        ElementBackground = Color3.fromRGB(15, 15, 15),
+        ElementBackgroundHover = Color3.fromRGB(28, 28, 28),
+        SecondaryElementBackground = Color3.fromRGB(8, 8, 8),
+        ElementStroke = Color3.fromRGB(40, 40, 40),
+        SecondaryElementStroke = Color3.fromRGB(30, 30, 30),
+
+        SliderBackground = Color3.fromRGB(60, 60, 60),
+        SliderProgress = Color3.fromRGB(150, 150, 150),
+        SliderStroke = Color3.fromRGB(90, 90, 90),
+
+        ToggleBackground = Color3.fromRGB(15, 15, 15),
+        ToggleEnabled = Color3.fromRGB(220, 220, 220),
+        ToggleDisabled = Color3.fromRGB(80, 80, 80),
+        ToggleEnabledStroke = Color3.fromRGB(255, 255, 255),
+        ToggleDisabledStroke = Color3.fromRGB(110, 110, 110),
+        ToggleEnabledOuterStroke = Color3.fromRGB(100, 100, 100),
+        ToggleDisabledOuterStroke = Color3.fromRGB(40, 40, 40),
+
+        DropdownSelected = Color3.fromRGB(30, 30, 30),
+        DropdownUnselected = Color3.fromRGB(15, 15, 15),
+
+        InputBackground = Color3.fromRGB(10, 10, 10),
+        InputStroke = Color3.fromRGB(60, 60, 60),
+        PlaceholderColor = Color3.fromRGB(150, 150, 150),
+    },
 })
+
+-- 一載入就建立浮動按鈕（點一下隱藏／顯示選單，可拖曳）
+ensureFloatButton()
+
+-- 移除 Rayfield 自己的「重新開啟」按鈕（Prompt），只用上面的浮動按鈕
+task.spawn(function()
+    local function findPrompts()
+        local roots = {}
+        if gethui then
+            local ok, h = pcall(gethui)
+            if ok and h then table.insert(roots, h) end
+        end
+        table.insert(roots, game:GetService("CoreGui"))
+        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+        if pg then table.insert(roots, pg) end
+
+        local found = {}
+        for _, root in ipairs(roots) do
+            for _, gui in ipairs(root:GetChildren()) do
+                if gui:IsA("ScreenGui") and gui ~= floatGui then
+                    local main = gui:FindFirstChild("Main")
+                    local prompt = gui:FindFirstChild("Prompt")
+                    if main and prompt then
+                        table.insert(found, prompt)
+                    end
+                end
+            end
+        end
+        return found
+    end
+
+    while true do
+        for _, prompt in ipairs(findPrompts()) do
+            pcall(function()
+                if prompt.Visible then
+                    prompt.Visible = false
+                end
+            end)
+        end
+        task.wait(0.2)
+    end
+end)
 
 -- ---------- 主要 ----------
 local Tab = Window:CreateTab("主要", 4483362458)
@@ -1426,7 +1520,7 @@ regToggle("autoload", tAutoload, function() return autoloadOn end)
 SetTab:CreateSection("介面與聲音")
 
 SetTab:CreateButton({
-    Name = "隱藏選單（會出現可拖曳的小按鈕）",
+    Name = "隱藏選單（用「卡」小按鈕叫回）",
     Callback = function()
         ensureFloatButton()
         setMenuVisible(false)
