@@ -2,12 +2,16 @@ local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
 
 local UIS = game:GetService("UserInputService")
 local VIM = game:GetService("VirtualInputManager")
+local Players = game:GetService("Players")
+local Lighting = game:GetService("Lighting")
+local RunService = game:GetService("RunService")
 
+-- ========== 自動點擊設定 ==========
 local enabled = false
 local shortcutEnabled = false  -- 雙擊捷徑預設關閉
-local unit = "毫秒"   -- "毫秒" 或 "秒"
-local value = 100     -- 使用者輸入的數字
-local interval = 0.1  -- 實際間隔（秒）
+local unit = "毫秒"
+local value = 100
+local interval = 0.1
 
 local lastAutoClick = 0
 local lastTap = 0
@@ -51,9 +55,121 @@ task.spawn(function()
     end
 end)
 
+-- ========== 修改器設定 ==========
+local speedOn, speedVal = false, 50
+local jumpOn, jumpVal = false, 100
+local brightOn, brightVal = false, 2
+local fogOn = false
+local filterOn = false
+
+local orig = {}          -- 原始數值
+local filterOrig = {}    -- 濾鏡原本的開關狀態
+
+local function getHumanoid()
+    local char = Players.LocalPlayer.Character
+    return char and char:FindFirstChildOfClass("Humanoid")
+end
+
+-- 去霧：把霧推到極遠，Atmosphere 的濃度與霧氣歸零
+local function applyNoFog()
+    Lighting.FogStart = 1e9
+    Lighting.FogEnd = 1e9
+    for _, v in ipairs(Lighting:GetChildren()) do
+        if v:IsA("Atmosphere") then
+            v.Density = 0
+            v.Haze = 0
+        end
+    end
+end
+
+local function saveFog()
+    orig.FogStart = Lighting.FogStart
+    orig.FogEnd = Lighting.FogEnd
+    orig.atmos = {}
+    for _, v in ipairs(Lighting:GetChildren()) do
+        if v:IsA("Atmosphere") then
+            orig.atmos[v] = {Density = v.Density, Haze = v.Haze}
+        end
+    end
+end
+
+local function restoreFog()
+    if orig.FogStart then
+        Lighting.FogStart = orig.FogStart
+        Lighting.FogEnd = orig.FogEnd
+    end
+    if orig.atmos then
+        for v, d in pairs(orig.atmos) do
+            if v.Parent then
+                v.Density = d.Density
+                v.Haze = d.Haze
+            end
+        end
+    end
+    orig.atmos = nil
+end
+
+-- 去濾鏡：關閉所有後製特效（模糊、色彩校正、光暈、光線、景深）
+local function disableFilters()
+    local roots = {Lighting}
+    if workspace.CurrentCamera then
+        table.insert(roots, workspace.CurrentCamera)
+    end
+    for _, root in ipairs(roots) do
+        for _, v in ipairs(root:GetDescendants()) do
+            if v:IsA("PostEffect") then
+                if filterOrig[v] == nil then
+                    filterOrig[v] = v.Enabled
+                end
+                v.Enabled = false
+            end
+        end
+    end
+end
+
+local function restoreFilters()
+    for v, e in pairs(filterOrig) do
+        if v.Parent then
+            v.Enabled = e
+        end
+    end
+    filterOrig = {}
+end
+
+-- 每幀套用數值（遊戲把數值改回去時會自動再改回來）
+RunService.Heartbeat:Connect(function()
+    local hum = getHumanoid()
+    if hum then
+        if speedOn then
+            hum.WalkSpeed = speedVal
+        end
+        if jumpOn then
+            hum.UseJumpPower = true
+            hum.JumpPower = jumpVal
+        end
+    end
+    if brightOn then
+        Lighting.Brightness = brightVal
+    end
+    if fogOn then
+        applyNoFog()
+    end
+end)
+
+-- 濾鏡可能中途被遊戲新增，所以定時檢查
+task.spawn(function()
+    while true do
+        if filterOn then
+            pcall(disableFilters)
+        end
+        task.wait(0.5)
+    end
+end)
+
+-- ========== 介面 ==========
 local Window = Rayfield:CreateWindow({
-    Name = "自動點擊器",
-    LoadingTitle = "自動點擊器",
+    Name = "卡依腳本",
+    LoadingTitle = "卡依腳本",
     LoadingSubtitle = "Rayfield",
     ConfigurationSaving = {
         Enabled = false,
@@ -61,6 +177,7 @@ local Window = Rayfield:CreateWindow({
     KeySystem = false
 })
 
+-- ---------- 主要 ----------
 local Tab = Window:CreateTab("主要", 4483362458)
 
 local Toggle = Tab:CreateToggle({
@@ -118,6 +235,141 @@ Tab:CreateInput({
     end,
 })
 
+-- ---------- 修改器 ----------
+local ModTab = Window:CreateTab("修改器", 4483362458)
+
+ModTab:CreateSection("速度")
+
+ModTab:CreateToggle({
+    Name = "啟用速度修改",
+    CurrentValue = false,
+    Flag = "SpeedToggle",
+    Callback = function(v)
+        speedOn = v
+        if v then
+            local hum = getHumanoid()
+            if hum then orig.WalkSpeed = hum.WalkSpeed end
+        else
+            local hum = getHumanoid()
+            if hum and orig.WalkSpeed then
+                hum.WalkSpeed = orig.WalkSpeed
+            end
+        end
+    end,
+})
+
+ModTab:CreateInput({
+    Name = "速度（輸入數字）",
+    PlaceholderText = "預設 16，例如 50",
+    RemoveTextAfterFocusLost = false,
+    Callback = function(text)
+        local n = tonumber(text)
+        if n and n >= 0 then
+            speedVal = n
+            Rayfield:Notify({Title = "已設定", Content = "速度 = " .. n, Duration = 3})
+        else
+            Rayfield:Notify({Title = "輸入錯誤", Content = "請輸入數字", Duration = 3})
+        end
+    end,
+})
+
+ModTab:CreateSection("跳躍")
+
+ModTab:CreateToggle({
+    Name = "啟用跳躍修改",
+    CurrentValue = false,
+    Flag = "JumpToggle",
+    Callback = function(v)
+        jumpOn = v
+        local hum = getHumanoid()
+        if v then
+            if hum then
+                orig.UseJumpPower = hum.UseJumpPower
+                orig.JumpPower = hum.JumpPower
+            end
+        else
+            if hum and orig.JumpPower then
+                hum.UseJumpPower = orig.UseJumpPower
+                hum.JumpPower = orig.JumpPower
+            end
+        end
+    end,
+})
+
+ModTab:CreateInput({
+    Name = "跳躍力（輸入數字）",
+    PlaceholderText = "預設 50，例如 100",
+    RemoveTextAfterFocusLost = false,
+    Callback = function(text)
+        local n = tonumber(text)
+        if n and n >= 0 then
+            jumpVal = n
+            Rayfield:Notify({Title = "已設定", Content = "跳躍力 = " .. n, Duration = 3})
+        else
+            Rayfield:Notify({Title = "輸入錯誤", Content = "請輸入數字", Duration = 3})
+        end
+    end,
+})
+
+ModTab:CreateSection("畫面")
+
+ModTab:CreateToggle({
+    Name = "啟用亮度修改",
+    CurrentValue = false,
+    Flag = "BrightToggle",
+    Callback = function(v)
+        brightOn = v
+        if v then
+            orig.Brightness = Lighting.Brightness
+        elseif orig.Brightness then
+            Lighting.Brightness = orig.Brightness
+        end
+    end,
+})
+
+ModTab:CreateInput({
+    Name = "亮度（輸入數字）",
+    PlaceholderText = "例如 2，越大越亮",
+    RemoveTextAfterFocusLost = false,
+    Callback = function(text)
+        local n = tonumber(text)
+        if n and n >= 0 then
+            brightVal = n
+            Rayfield:Notify({Title = "已設定", Content = "亮度 = " .. n, Duration = 3})
+        else
+            Rayfield:Notify({Title = "輸入錯誤", Content = "請輸入數字", Duration = 3})
+        end
+    end,
+})
+
+ModTab:CreateToggle({
+    Name = "去霧",
+    CurrentValue = false,
+    Flag = "NoFogToggle",
+    Callback = function(v)
+        fogOn = v
+        if v then
+            saveFog()
+        else
+            restoreFog()
+        end
+    end,
+})
+
+ModTab:CreateToggle({
+    Name = "去濾鏡",
+    CurrentValue = false,
+    Flag = "NoFilterToggle",
+    Callback = function(v)
+        filterOn = v
+        if v then
+            pcall(disableFilters)
+        else
+            restoreFilters()
+        end
+    end,
+})
+
 -- 快速點擊兩下螢幕 = 開關自動點擊（需先開啟「啟用雙擊開關捷徑」）
 UIS.InputBegan:Connect(function(input)
     if not shortcutEnabled then
@@ -145,7 +397,7 @@ end)
 updateInterval()
 
 Rayfield:Notify({
-    Title = "載入完成",
-    Content = "請先在介面中開啟需要的功能",
+    Title = "卡依腳本",
+    Content = "載入完成，請先在介面中開啟需要的功能",
     Duration = 4,
 })
