@@ -751,12 +751,75 @@ end
 local menuVisible = true
 local floatGui = nil
 
+-- 記住 Rayfield 主選單位置，隱藏後再顯示時還原
+local savedMenuPos = nil
+local restoring = false
+local cachedMain = nil
+
+local function getRayfieldMain()
+    if cachedMain and cachedMain.Parent then
+        return cachedMain
+    end
+    local roots = {}
+    if gethui then
+        local ok, h = pcall(gethui)
+        if ok and h then table.insert(roots, h) end
+    end
+    table.insert(roots, game:GetService("CoreGui"))
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    if pg then table.insert(roots, pg) end
+
+    for _, root in ipairs(roots) do
+        for _, gui in ipairs(root:GetChildren()) do
+            if gui:IsA("ScreenGui") and gui ~= floatGui then
+                local main = gui:FindFirstChild("Main")
+                if main and gui:FindFirstChild("Prompt") then
+                    cachedMain = main
+                    return main
+                end
+            end
+        end
+    end
+end
+
 local function setMenuVisible(v)
+    -- 隱藏前先記住目前位置
+    if not v and not restoring then
+        local main = getRayfieldMain()
+        if main then savedMenuPos = main.Position end
+    end
+
     menuVisible = v
     pcall(function()
         Rayfield:SetVisibility(v)
     end)
+
+    -- 顯示後把位置還原（Rayfield 會把它重設到中央，所以連續套用幾次）
+    if v and savedMenuPos then
+        restoring = true
+        task.spawn(function()
+            for _ = 1, 5 do
+                local m = getRayfieldMain()
+                if m then m.Position = savedMenuPos end
+                task.wait(0.1)
+            end
+            restoring = false
+        end)
+    end
 end
+
+-- 持續記錄選單位置（連用 Rayfield 自己的 X 關掉也能記住）
+task.spawn(function()
+    while true do
+        if menuVisible and not restoring then
+            local m = getRayfieldMain()
+            if m and m.Visible then
+                savedMenuPos = m.Position
+            end
+        end
+        task.wait(0.2)
+    end
+end)
 
 -- 切換選單（會先跟 Rayfield 目前的顯示狀態同步，避免用 Rayfield 自己的 X 關掉後狀態對不上）
 local function toggleMenu()
