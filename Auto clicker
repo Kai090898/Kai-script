@@ -5,6 +5,15 @@ local VIM = game:GetService("VirtualInputManager")
 local Players = game:GetService("Players")
 local Lighting = game:GetService("Lighting")
 local RunService = game:GetService("RunService")
+local TeleportService = game:GetService("TeleportService")
+local HttpService = game:GetService("HttpService")
+local VirtualUser = game:GetService("VirtualUser")
+
+local LocalPlayer = Players.LocalPlayer
+
+local function notify(title, content, duration)
+    Rayfield:Notify({Title = title, Content = content, Duration = duration or 3})
+end
 
 -- ========== 自動點擊設定 ==========
 local enabled = false
@@ -61,16 +70,33 @@ local jumpOn, jumpVal = false, 100
 local brightOn, brightVal = false, 2
 local fogOn = false
 local filterOn = false
+local fovOn, fovVal = false, 90
+local boostOn = false
+local infJumpOn = false
+local flyOn, flyVal = false, 50
+local noclipOn = false
+local gravOn, gravVal = false, 50
+local clickTpOn = false
+local antiAfkOn = false
 
 local orig = {}          -- 原始數值
 local filterOrig = {}    -- 濾鏡原本的開關狀態
+local boostOrig = {}     -- 特效原本的開關狀態
+local noclipParts = {}   -- 被穿牆修改過的零件
+local flyBV = nil
+local boostConn = nil
 
 local function getHumanoid()
-    local char = Players.LocalPlayer.Character
+    local char = LocalPlayer.Character
     return char and char:FindFirstChildOfClass("Humanoid")
 end
 
--- 去霧：把霧推到極遠，Atmosphere 的濃度與霧氣歸零
+local function getRoot()
+    local char = LocalPlayer.Character
+    return char and char:FindFirstChild("HumanoidRootPart")
+end
+
+-- ----- 去霧 -----
 local function applyNoFog()
     Lighting.FogStart = 1e9
     Lighting.FogEnd = 1e9
@@ -109,7 +135,7 @@ local function restoreFog()
     orig.atmos = nil
 end
 
--- 去濾鏡：關閉所有後製特效（模糊、色彩校正、光暈、光線、景深）
+-- ----- 去濾鏡 -----
 local function disableFilters()
     local roots = {Lighting}
     if workspace.CurrentCamera then
@@ -136,6 +162,77 @@ local function restoreFilters()
     filterOrig = {}
 end
 
+-- ----- FPS 提升 -----
+local boostClasses = {"ParticleEmitter", "Trail", "Beam", "Smoke", "Fire", "Sparkles"}
+
+local function boostCheck(v)
+    for _, c in ipairs(boostClasses) do
+        if v:IsA(c) then
+            if boostOrig[v] == nil then
+                boostOrig[v] = v.Enabled
+            end
+            v.Enabled = false
+            return
+        end
+    end
+end
+
+local function boostStart()
+    orig.Shadows = Lighting.GlobalShadows
+    Lighting.GlobalShadows = false
+    pcall(function()
+        orig.Quality = settings().Rendering.QualityLevel
+        settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+    end)
+    for _, v in ipairs(workspace:GetDescendants()) do
+        boostCheck(v)
+    end
+    boostConn = workspace.DescendantAdded:Connect(boostCheck)
+end
+
+local function boostStop()
+    if boostConn then
+        boostConn:Disconnect()
+        boostConn = nil
+    end
+    if orig.Shadows ~= nil then
+        Lighting.GlobalShadows = orig.Shadows
+    end
+    pcall(function()
+        if orig.Quality then
+            settings().Rendering.QualityLevel = orig.Quality
+        end
+    end)
+    for v, e in pairs(boostOrig) do
+        if v.Parent then
+            v.Enabled = e
+        end
+    end
+    boostOrig = {}
+end
+
+-- ----- 飛行 -----
+local function stopFly()
+    if flyBV then
+        flyBV:Destroy()
+        flyBV = nil
+    end
+    local root = getRoot()
+    if root then
+        root.AssemblyLinearVelocity = Vector3.zero
+    end
+end
+
+-- ----- 穿牆 -----
+local function restoreNoclip()
+    for p in pairs(noclipParts) do
+        if p.Parent then
+            p.CanCollide = true
+        end
+    end
+    noclipParts = {}
+end
+
 -- 每幀套用數值（遊戲把數值改回去時會自動再改回來）
 RunService.Heartbeat:Connect(function()
     local hum = getHumanoid()
@@ -154,6 +251,54 @@ RunService.Heartbeat:Connect(function()
     if fogOn then
         applyNoFog()
     end
+    if gravOn then
+        workspace.Gravity = gravVal
+    end
+
+    -- 飛行
+    if flyOn then
+        local root = getRoot()
+        local cam = workspace.CurrentCamera
+        if root and hum and cam then
+            if not flyBV or flyBV.Parent ~= root then
+                if flyBV then flyBV:Destroy() end
+                flyBV = Instance.new("BodyVelocity")
+                flyBV.MaxForce = Vector3.new(1e9, 1e9, 1e9)
+                flyBV.Velocity = Vector3.zero
+                flyBV.Parent = root
+            end
+            local cf = cam.CFrame
+            local flatLook = Vector3.new(cf.LookVector.X, 0, cf.LookVector.Z)
+            local flatRight = Vector3.new(cf.RightVector.X, 0, cf.RightVector.Z)
+            local move = hum.MoveDirection
+            local f, s = 0, 0
+            if flatLook.Magnitude > 0.01 then f = move:Dot(flatLook.Unit) end
+            if flatRight.Magnitude > 0.01 then s = move:Dot(flatRight.Unit) end
+            flyBV.Velocity = (cf.LookVector * f + cf.RightVector * s) * flyVal
+        end
+    end
+end)
+
+-- 視野（相機每幀更新，所以放在 RenderStepped）
+RunService.RenderStepped:Connect(function()
+    if fovOn and workspace.CurrentCamera then
+        workspace.CurrentCamera.FieldOfView = fovVal
+    end
+end)
+
+-- 穿牆
+RunService.Stepped:Connect(function()
+    if noclipOn then
+        local char = LocalPlayer.Character
+        if char then
+            for _, p in ipairs(char:GetDescendants()) do
+                if p:IsA("BasePart") and p.CanCollide then
+                    noclipParts[p] = true
+                    p.CanCollide = false
+                end
+            end
+        end
+    end
 end)
 
 -- 濾鏡可能中途被遊戲新增，所以定時檢查
@@ -165,6 +310,111 @@ task.spawn(function()
         task.wait(0.5)
     end
 end)
+
+-- 無限跳
+UIS.JumpRequest:Connect(function()
+    if infJumpOn then
+        local hum = getHumanoid()
+        if hum then
+            hum:ChangeState(Enum.HumanoidStateType.Jumping)
+        end
+    end
+end)
+
+-- 防掛機
+LocalPlayer.Idled:Connect(function()
+    if antiAfkOn then
+        pcall(function()
+            VirtualUser:CaptureController()
+            VirtualUser:ClickButton2(Vector2.new())
+        end)
+    end
+end)
+
+-- 點擊傳送（輕點才會傳送，拖曳轉視角不會）
+local tapStart = {}
+
+UIS.InputBegan:Connect(function(input, processed)
+    if not clickTpOn or processed then
+        return
+    end
+    local t = input.UserInputType
+    if t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.Touch then
+        if tick() - lastAutoClick < 0.05 then
+            return
+        end
+        tapStart[input] = {
+            pos = Vector2.new(input.Position.X, input.Position.Y),
+            time = tick(),
+            touch = (t == Enum.UserInputType.Touch),
+        }
+    end
+end)
+
+UIS.InputEnded:Connect(function(input)
+    local info = tapStart[input]
+    if not info then
+        return
+    end
+    tapStart[input] = nil
+    if not clickTpOn then
+        return
+    end
+
+    local endPos = Vector2.new(input.Position.X, input.Position.Y)
+    if tick() - info.time > 0.3 or (endPos - info.pos).Magnitude > 15 then
+        return
+    end
+
+    local cam = workspace.CurrentCamera
+    local root = getRoot()
+    if not cam or not root then
+        return
+    end
+
+    local ray
+    if info.touch then
+        ray = cam:ScreenPointToRay(endPos.X, endPos.Y)
+    else
+        local m = UIS:GetMouseLocation()
+        ray = cam:ViewportPointToRay(m.X, m.Y)
+    end
+
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = {LocalPlayer.Character}
+
+    local result = workspace:Raycast(ray.Origin, ray.Direction * 2000, params)
+    if result then
+        root.CFrame = CFrame.new(result.Position + Vector3.new(0, 3, 0))
+    end
+end)
+
+-- ----- 重新加入 / 換伺服器 -----
+local function rejoin()
+    if #Players:GetPlayers() <= 1 then
+        TeleportService:Teleport(game.PlaceId, LocalPlayer)
+    else
+        TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
+    end
+end
+
+local function serverHop()
+    local ok, found = pcall(function()
+        local url = "https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Asc&limit=100"
+        local data = HttpService:JSONDecode(game:HttpGet(url))
+        for _, s in ipairs(data.data) do
+            if s.id ~= game.JobId and s.playing < s.maxPlayers then
+                TeleportService:TeleportToPlaceInstance(game.PlaceId, s.id, LocalPlayer)
+                return true
+            end
+        end
+        return false
+    end)
+    if not ok or not found then
+        notify("換伺服器失敗", "找不到可加入的其他伺服器")
+    end
+end
 
 -- ========== 介面 ==========
 local Window = Rayfield:CreateWindow({
@@ -220,17 +470,9 @@ Tab:CreateInput({
         if n and n > 0 then
             value = n
             updateInterval()
-            Rayfield:Notify({
-                Title = "已設定",
-                Content = "每 " .. value .. " " .. unit .. "點擊一次",
-                Duration = 3,
-            })
+            notify("已設定", "每 " .. value .. " " .. unit .. "點擊一次")
         else
-            Rayfield:Notify({
-                Title = "輸入錯誤",
-                Content = "請輸入大於 0 的數字",
-                Duration = 3,
-            })
+            notify("輸入錯誤", "請輸入大於 0 的數字")
         end
     end,
 })
@@ -238,6 +480,7 @@ Tab:CreateInput({
 -- ---------- 修改器 ----------
 local ModTab = Window:CreateTab("修改器", 4483362458)
 
+-- 速度
 ModTab:CreateSection("速度")
 
 ModTab:CreateToggle({
@@ -246,11 +489,10 @@ ModTab:CreateToggle({
     Flag = "SpeedToggle",
     Callback = function(v)
         speedOn = v
+        local hum = getHumanoid()
         if v then
-            local hum = getHumanoid()
             if hum then orig.WalkSpeed = hum.WalkSpeed end
         else
-            local hum = getHumanoid()
             if hum and orig.WalkSpeed then
                 hum.WalkSpeed = orig.WalkSpeed
             end
@@ -266,13 +508,14 @@ ModTab:CreateInput({
         local n = tonumber(text)
         if n and n >= 0 then
             speedVal = n
-            Rayfield:Notify({Title = "已設定", Content = "速度 = " .. n, Duration = 3})
+            notify("已設定", "速度 = " .. n)
         else
-            Rayfield:Notify({Title = "輸入錯誤", Content = "請輸入數字", Duration = 3})
+            notify("輸入錯誤", "請輸入數字")
         end
     end,
 })
 
+-- 跳躍
 ModTab:CreateSection("跳躍")
 
 ModTab:CreateToggle({
@@ -304,13 +547,23 @@ ModTab:CreateInput({
         local n = tonumber(text)
         if n and n >= 0 then
             jumpVal = n
-            Rayfield:Notify({Title = "已設定", Content = "跳躍力 = " .. n, Duration = 3})
+            notify("已設定", "跳躍力 = " .. n)
         else
-            Rayfield:Notify({Title = "輸入錯誤", Content = "請輸入數字", Duration = 3})
+            notify("輸入錯誤", "請輸入數字")
         end
     end,
 })
 
+ModTab:CreateToggle({
+    Name = "無限跳",
+    CurrentValue = false,
+    Flag = "InfJumpToggle",
+    Callback = function(v)
+        infJumpOn = v
+    end,
+})
+
+-- 畫面
 ModTab:CreateSection("畫面")
 
 ModTab:CreateToggle({
@@ -335,9 +588,9 @@ ModTab:CreateInput({
         local n = tonumber(text)
         if n and n >= 0 then
             brightVal = n
-            Rayfield:Notify({Title = "已設定", Content = "亮度 = " .. n, Duration = 3})
+            notify("已設定", "亮度 = " .. n)
         else
-            Rayfield:Notify({Title = "輸入錯誤", Content = "請輸入數字", Duration = 3})
+            notify("輸入錯誤", "請輸入數字")
         end
     end,
 })
@@ -370,6 +623,216 @@ ModTab:CreateToggle({
     end,
 })
 
+ModTab:CreateToggle({
+    Name = "啟用視野（FOV）修改",
+    CurrentValue = false,
+    Flag = "FovToggle",
+    Callback = function(v)
+        fovOn = v
+        local cam = workspace.CurrentCamera
+        if v then
+            if cam then orig.FOV = cam.FieldOfView end
+        elseif cam and orig.FOV then
+            cam.FieldOfView = orig.FOV
+        end
+    end,
+})
+
+ModTab:CreateInput({
+    Name = "視野（輸入數字）",
+    PlaceholderText = "預設 70，範圍 1~120",
+    RemoveTextAfterFocusLost = false,
+    Callback = function(text)
+        local n = tonumber(text)
+        if n and n >= 1 and n <= 120 then
+            fovVal = n
+            notify("已設定", "視野 = " .. n)
+        else
+            notify("輸入錯誤", "請輸入 1~120 的數字")
+        end
+    end,
+})
+
+ModTab:CreateToggle({
+    Name = "FPS 提升（關陰影、降畫質、關特效）",
+    CurrentValue = false,
+    Flag = "BoostToggle",
+    Callback = function(v)
+        boostOn = v
+        if v then
+            pcall(boostStart)
+        else
+            pcall(boostStop)
+        end
+    end,
+})
+
+-- 移動
+ModTab:CreateSection("移動")
+
+ModTab:CreateToggle({
+    Name = "啟用飛行",
+    CurrentValue = false,
+    Flag = "FlyToggle",
+    Callback = function(v)
+        flyOn = v
+        if not v then
+            stopFly()
+        end
+    end,
+})
+
+ModTab:CreateInput({
+    Name = "飛行速度（輸入數字）",
+    PlaceholderText = "例如 50",
+    RemoveTextAfterFocusLost = false,
+    Callback = function(text)
+        local n = tonumber(text)
+        if n and n >= 0 then
+            flyVal = n
+            notify("已設定", "飛行速度 = " .. n)
+        else
+            notify("輸入錯誤", "請輸入數字")
+        end
+    end,
+})
+
+ModTab:CreateToggle({
+    Name = "穿牆（Noclip）",
+    CurrentValue = false,
+    Flag = "NoclipToggle",
+    Callback = function(v)
+        noclipOn = v
+        if not v then
+            restoreNoclip()
+        end
+    end,
+})
+
+ModTab:CreateToggle({
+    Name = "啟用重力修改",
+    CurrentValue = false,
+    Flag = "GravToggle",
+    Callback = function(v)
+        gravOn = v
+        if v then
+            orig.Gravity = workspace.Gravity
+        elseif orig.Gravity then
+            workspace.Gravity = orig.Gravity
+        end
+    end,
+})
+
+ModTab:CreateInput({
+    Name = "重力（輸入數字）",
+    PlaceholderText = "預設 196.2，越小越輕",
+    RemoveTextAfterFocusLost = false,
+    Callback = function(text)
+        local n = tonumber(text)
+        if n and n >= 0 then
+            gravVal = n
+            notify("已設定", "重力 = " .. n)
+        else
+            notify("輸入錯誤", "請輸入數字")
+        end
+    end,
+})
+
+-- 傳送
+ModTab:CreateSection("傳送")
+
+ModTab:CreateToggle({
+    Name = "點擊傳送（輕點地面就傳過去）",
+    CurrentValue = false,
+    Flag = "ClickTpToggle",
+    Callback = function(v)
+        clickTpOn = v
+    end,
+})
+
+local function playerNames()
+    local t = {}
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer then
+            table.insert(t, p.Name)
+        end
+    end
+    return t
+end
+
+local selectedName = nil
+
+local PlayerDropdown = ModTab:CreateDropdown({
+    Name = "選擇玩家",
+    Options = playerNames(),
+    CurrentOption = {},
+    MultipleOptions = false,
+    Flag = "TpPlayerDropdown",
+    Callback = function(opt)
+        selectedName = type(opt) == "table" and opt[1] or opt
+    end,
+})
+
+local function refreshPlayers()
+    pcall(function()
+        PlayerDropdown:Refresh(playerNames())
+    end)
+end
+
+Players.PlayerAdded:Connect(refreshPlayers)
+Players.PlayerRemoving:Connect(function()
+    task.defer(refreshPlayers)
+end)
+
+ModTab:CreateButton({
+    Name = "重新整理玩家清單",
+    Callback = function()
+        refreshPlayers()
+        notify("已更新", "玩家清單已重新整理", 2)
+    end,
+})
+
+ModTab:CreateButton({
+    Name = "傳送到選擇的玩家",
+    Callback = function()
+        local target = selectedName and Players:FindFirstChild(selectedName)
+        local tchar = target and target.Character
+        local troot = tchar and tchar:FindFirstChild("HumanoidRootPart")
+        local root = getRoot()
+        if troot and root then
+            root.CFrame = troot.CFrame * CFrame.new(0, 0, 3)
+        else
+            notify("傳送失敗", "找不到該玩家，請先選擇玩家")
+        end
+    end,
+})
+
+-- 其他
+ModTab:CreateSection("其他")
+
+ModTab:CreateToggle({
+    Name = "防掛機（Anti-AFK）",
+    CurrentValue = false,
+    Flag = "AntiAfkToggle",
+    Callback = function(v)
+        antiAfkOn = v
+    end,
+})
+
+ModTab:CreateButton({
+    Name = "重新加入（同一個伺服器）",
+    Callback = function()
+        pcall(rejoin)
+    end,
+})
+
+ModTab:CreateButton({
+    Name = "換伺服器",
+    Callback = function()
+        serverHop()
+    end,
+})
+
 -- 快速點擊兩下螢幕 = 開關自動點擊（需先開啟「啟用雙擊開關捷徑」）
 UIS.InputBegan:Connect(function(input)
     if not shortcutEnabled then
@@ -396,8 +859,4 @@ end)
 
 updateInterval()
 
-Rayfield:Notify({
-    Title = "卡依腳本",
-    Content = "載入完成，請先在介面中開啟需要的功能",
-    Duration = 4,
-})
+notify("卡依腳本", "載入完成，請先在介面中開啟需要的功能", 4)
