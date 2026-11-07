@@ -107,6 +107,10 @@ local infJumpOn = false
 local flyOn, flyVal = false, 50
 local noclipOn = false
 local antiFlingOn = false
+local antiVoidOn = false
+local safePos = nil       -- 最後一次站在地面上的位置
+local lastSafeSave = 0
+local lastVoidTp = 0
 local gravOn, gravVal = false, 50
 local clickTpOn = false
 local antiAfkOn = false
@@ -599,6 +603,75 @@ RunService.Stepped:Connect(function()
     end
 end)
 
+-- ----- 防掉虛空 -----
+local function getVoidY()
+    local fh = workspace.FallenPartsDestroyHeight
+    -- 有些地圖把它設成極小值或 NaN，這時改用預設的 -500
+    if fh ~= fh or fh < -1e5 then
+        fh = -500
+    end
+    return fh + 80  -- 在被系統清掉之前就先救回來
+end
+
+RunService.Heartbeat:Connect(function()
+    if not antiVoidOn then
+        return
+    end
+    local root = getRoot()
+    local hum = getHumanoid()
+    if not (root and hum) or hum.Health <= 0 then
+        return
+    end
+
+    -- 站在地面上時，每 0.25 秒記錄一次安全位置
+    if hum.FloorMaterial ~= Enum.Material.Air and root.Position.Y > getVoidY() + 20 then
+        if tick() - lastSafeSave > 0.25 then
+            lastSafeSave = tick()
+            safePos = root.Position
+        end
+    end
+
+    -- 掉到虛空高度以下 → 傳回安全位置
+    if root.Position.Y < getVoidY() and tick() - lastVoidTp > 1 then
+        lastVoidTp = tick()
+        local target = safePos
+        if not target then
+            local spawn = workspace:FindFirstChildWhichIsA("SpawnLocation", true)
+            target = spawn and (spawn.Position + Vector3.new(0, 3, 0))
+        end
+        if target then
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
+            root.CFrame = CFrame.new(target + Vector3.new(0, 5, 0))
+            notify("防掉虛空", "已把你傳回安全位置", 2)
+        end
+    end
+end)
+
+-- ----- 重生後自動恢復 -----
+-- 速度、跳躍、重力、視野、飛行、穿牆、防被撞飛本來就是每幀重新套用，
+-- 這裡負責清掉舊角色留下的殘留狀態，讓新角色一出生就乾淨地套用
+LocalPlayer.CharacterAdded:Connect(function(char)
+    flyBV = nil
+    noclipParts = {}
+    antiFlingParts = {}
+    safePos = nil
+    lastSafeSave = 0
+
+    local hum = char:WaitForChild("Humanoid", 10)
+    local root = char:WaitForChild("HumanoidRootPart", 10)
+    if not (hum and root) then
+        return
+    end
+    if speedOn then
+        hum.WalkSpeed = speedVal
+    end
+    if jumpOn then
+        hum.UseJumpPower = true
+        hum.JumpPower = jumpVal
+    end
+end)
+
 -- 濾鏡可能中途被遊戲新增，所以定時檢查
 task.spawn(function()
     while true do
@@ -857,6 +930,7 @@ local EN = {
     ["例如 50"] = "e.g. 50",
     ["穿牆（Noclip）"] = "Noclip",
     ["防被撞飛（角色透明、別人碰不到）"] = "Anti-Fling (transparent, untouchable)",
+    ["防掉虛空（掉出地圖自動傳回）"] = "Anti-Void (auto return when falling out)",
     ["啟用重力修改"] = "Gravity Modifier",
     ["重力（輸入數字）"] = "Gravity (number)",
     ["預設 196.2，越小越輕"] = "Default 196.2, lower = lighter",
@@ -1240,6 +1314,19 @@ local tAntiFling = ModTab:CreateToggle({
     end,
 })
 regToggle("antiFling", tAntiFling, function() return antiFlingOn end)
+
+local tAntiVoid = ModTab:CreateToggle({
+    Name = "防掉虛空（掉出地圖自動傳回）",
+    CurrentValue = false,
+    Callback = function(v)
+        antiVoidOn = v
+        if v then
+            safePos = nil
+            lastSafeSave = 0
+        end
+    end,
+})
+regToggle("antiVoid", tAntiVoid, function() return antiVoidOn end)
 
 local tGrav = ModTab:CreateToggle({
     Name = "啟用重力修改",
