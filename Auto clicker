@@ -884,6 +884,18 @@ local Window = UI:CreateWindow({
     Name = "卡依腳本",
 })
 
+-- 動態背景（圖片放在 GitHub：kai_bg.png，12 幀拼成 3 欄 x 4 列）
+Window:SetBackgroundGif({
+    Url = "https://raw.githubusercontent.com/Kai090898/Kai-slap-battles-script/refs/heads/main/kai_bg.png",
+    CacheName = "KaiUI_bg_v1.png",
+    Frames = 12,
+    Cols = 3,
+    FrameW = 340,
+    FrameH = 192,
+    FPS = 14,
+    Transparency = 0.7,
+})
+
 -- ========== 語言（中文 / 英文功能名稱）==========
 local EN = {
     ["卡依腳本"] = "Kai Script",
@@ -956,6 +968,7 @@ local EN = {
     ["啟動時自動載入設定"] = "Auto-load Settings on Start",
     ["隱藏選單（會出現可拖曳的小按鈕）"] = "Hide Menu (shows a draggable button)",
     ["遊戲靜音"] = "Mute Game",
+    ["動態背景"] = "Animated Background",
     ["功能名稱改成英文"] = "English Feature Names",
 }
 
@@ -1590,6 +1603,17 @@ local tAutoload = SetTab:CreateToggle({
 regToggle("autoload", tAutoload, function() return autoloadOn end)
 
 SetTab:CreateSection("介面與聲音")
+
+local bgOn = true
+local tBg = SetTab:CreateToggle({
+    Name = "動態背景",
+    CurrentValue = true,
+    Callback = function(v)
+        bgOn = v
+        Window:SetBackgroundEnabled(v)
+    end,
+})
+regToggle("bg", tBg, function() return bgOn end)
 
 local tEnglish = SetTab:CreateToggle({
     Name = "功能名稱改成英文",
