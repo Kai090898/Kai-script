@@ -1,0 +1,638 @@
+-- ====================================================================
+--  卡依介面庫（純黑）— 用法：local UI = loadstring(game:HttpGet("網址"))()
+-- ====================================================================
+do
+    local UIS = game:GetService("UserInputService")
+    local TweenService = game:GetService("TweenService")
+    local Players = game:GetService("Players")
+
+    local C = {
+        bg = Color3.fromRGB(0, 0, 0),
+        panel = Color3.fromRGB(8, 8, 8),
+        item = Color3.fromRGB(16, 16, 16),
+        hover = Color3.fromRGB(30, 30, 30),
+        stroke = Color3.fromRGB(42, 42, 42),
+        text = Color3.fromRGB(255, 255, 255),
+        sub = Color3.fromRGB(140, 140, 140),
+        off = Color3.fromRGB(55, 55, 55),
+    }
+    local FONT = Enum.Font.GothamMedium
+    local FONT_B = Enum.Font.GothamBold
+
+    local function new(class, props, parent)
+        local o = Instance.new(class)
+        for k, v in pairs(props) do
+            o[k] = v
+        end
+        if parent then
+            o.Parent = parent
+        end
+        return o
+    end
+
+    local function round(o, r)
+        new("UICorner", {CornerRadius = UDim.new(0, r or 6)}, o)
+    end
+
+    local function outline(o, col)
+        new("UIStroke", {
+            Color = col or C.stroke,
+            Thickness = 1,
+            ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+        }, o)
+    end
+
+    local function tween(o, props, t)
+        TweenService:Create(o, TweenInfo.new(t or 0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), props):Play()
+    end
+
+    local function safe(cb, ...)
+        if cb then
+            local ok, err = pcall(cb, ...)
+            if not ok then
+                warn("[卡依腳本] " .. tostring(err))
+            end
+        end
+    end
+
+    local function mount(gui)
+        local ok = pcall(function()
+            gui.Parent = (gethui and gethui()) or game:GetService("CoreGui")
+        end)
+        if not ok or not gui.Parent then
+            gui.Parent = Players.LocalPlayer:WaitForChild("PlayerGui")
+        end
+    end
+
+    local function cleanup(name)
+        local hosts = {}
+        pcall(function()
+            table.insert(hosts, (gethui and gethui()) or game:GetService("CoreGui"))
+        end)
+        table.insert(hosts, Players.LocalPlayer:WaitForChild("PlayerGui"))
+        for _, h in ipairs(hosts) do
+            local old = h:FindFirstChild(name)
+            if old then
+                old:Destroy()
+            end
+        end
+    end
+
+    local lib = {}
+    local main, float, notifyHolder
+
+    -- ---------- 通知 ----------
+    function lib:Notify(o)
+        if not notifyHolder then
+            return
+        end
+        local card = new("Frame", {
+            Size = UDim2.new(1, 0, 0, 0),
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundColor3 = C.panel,
+            BorderSizePixel = 0,
+        }, notifyHolder)
+        round(card, 8)
+        outline(card, Color3.fromRGB(70, 70, 70))
+        new("UIPadding", {
+            PaddingTop = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8),
+            PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10),
+        }, card)
+        new("UIListLayout", {Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder}, card)
+        new("TextLabel", {
+            Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1, Text = tostring(o.Title or ""),
+            Font = FONT_B, TextSize = 14, TextColor3 = C.text,
+            TextXAlignment = Enum.TextXAlignment.Left, TextWrapped = true, LayoutOrder = 1,
+        }, card)
+        new("TextLabel", {
+            Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1, Text = tostring(o.Content or ""),
+            Font = FONT, TextSize = 12, TextColor3 = C.sub,
+            TextXAlignment = Enum.TextXAlignment.Left, TextWrapped = true, LayoutOrder = 2,
+        }, card)
+        task.delay(o.Duration or 3, function()
+            if card.Parent then
+                card:Destroy()
+            end
+        end)
+    end
+
+    -- ---------- 顯示 / 隱藏 ----------
+    function lib:SetVisibility(v)
+        if main then
+            main.Visible = v and true or false
+        end
+    end
+
+    -- 判斷某個螢幕座標是否被選單蓋住
+    function lib:IsOverMenu(x, y)
+        if not main or not main.Visible then
+            return false
+        end
+        local p, s = main.AbsolutePosition, main.AbsoluteSize
+        local m = 20
+        return x >= p.X - m and x <= p.X + s.X + m and y >= p.Y - m and y <= p.Y + s.Y + m
+    end
+
+    -- ---------- 視窗 ----------
+    function lib:CreateWindow(cfg)
+        cleanup("KaiUI")
+
+        local gui = new("ScreenGui", {
+            Name = "KaiUI",
+            ResetOnSpawn = false,
+            IgnoreGuiInset = true,
+            DisplayOrder = 100,
+            ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+        })
+        mount(gui)
+
+        local vp = workspace.CurrentCamera.ViewportSize
+        local w = math.min(520, vp.X - 20)
+        local h = math.min(330, vp.Y - 20)
+
+        main = new("Frame", {
+            Name = "Main",
+            AnchorPoint = Vector2.new(0.5, 0.5),
+            Position = UDim2.new(0, w / 2 + 10, 0.5, 0),
+            Size = UDim2.fromOffset(w, h),
+            BackgroundColor3 = C.bg,
+            BorderSizePixel = 0,
+            ClipsDescendants = true,
+        }, gui)
+        round(main, 10)
+        outline(main, Color3.fromRGB(60, 60, 60))
+
+        -- 標題列
+        local titleBar = new("Frame", {
+            Size = UDim2.new(1, 0, 0, 36),
+            BackgroundColor3 = C.panel,
+            BorderSizePixel = 0,
+        }, main)
+        new("TextLabel", {
+            Size = UDim2.new(1, -60, 1, 0), Position = UDim2.new(0, 14, 0, 0),
+            BackgroundTransparency = 1, Text = cfg.Name or "UI",
+            Font = FONT_B, TextSize = 15, TextColor3 = C.text,
+            TextXAlignment = Enum.TextXAlignment.Left,
+        }, titleBar)
+        local minBtn = new("TextButton", {
+            Size = UDim2.fromOffset(40, 36), Position = UDim2.new(1, -40, 0, 0),
+            BackgroundTransparency = 1, Text = "—", Font = FONT_B,
+            TextSize = 16, TextColor3 = C.sub, AutoButtonColor = false,
+        }, titleBar)
+        new("Frame", {
+            Size = UDim2.new(1, 0, 0, 1), Position = UDim2.new(0, 0, 0, 36),
+            BackgroundColor3 = C.stroke, BorderSizePixel = 0,
+        }, main)
+
+        -- 內容區
+        local body = new("Frame", {
+            Size = UDim2.new(1, 0, 1, -37), Position = UDim2.new(0, 0, 0, 37),
+            BackgroundTransparency = 1,
+        }, main)
+
+        local tabList = new("ScrollingFrame", {
+            Size = UDim2.new(0, 104, 1, 0),
+            BackgroundColor3 = C.bg, BorderSizePixel = 0,
+            ScrollBarThickness = 0,
+            AutomaticCanvasSize = Enum.AutomaticSize.Y,
+            CanvasSize = UDim2.new(0, 0, 0, 0),
+        }, body)
+        new("UIListLayout", {Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder}, tabList)
+        new("UIPadding", {
+            PaddingTop = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8),
+            PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8),
+        }, tabList)
+
+        new("Frame", {
+            Size = UDim2.new(0, 1, 1, 0), Position = UDim2.new(0, 104, 0, 0),
+            BackgroundColor3 = C.stroke, BorderSizePixel = 0,
+        }, body)
+
+        local pages = new("Frame", {
+            Size = UDim2.new(1, -105, 1, 0), Position = UDim2.new(0, 105, 0, 0),
+            BackgroundTransparency = 1,
+        }, body)
+
+        -- 通知區（畫面上方中間）
+        notifyHolder = new("Frame", {
+            Name = "Notify",
+            AnchorPoint = Vector2.new(0.5, 0),
+            Position = UDim2.new(0.5, 0, 0, 10),
+            Size = UDim2.new(0, 240, 1, -20),
+            BackgroundTransparency = 1,
+        }, gui)
+        new("UIListLayout", {
+            Padding = UDim.new(0, 6),
+            SortOrder = Enum.SortOrder.LayoutOrder,
+            HorizontalAlignment = Enum.HorizontalAlignment.Center,
+        }, notifyHolder)
+
+        -- 浮動小按鈕（載入後一直顯示，點一下開關選單）
+        float = new("TextButton", {
+            Name = "Float",
+            Size = UDim2.fromOffset(44, 44),
+            Position = UDim2.new(0, 10, 0.4, 0),
+            BackgroundColor3 = C.bg,
+            Text = "卡", TextColor3 = C.text, Font = FONT_B, TextSize = 20,
+            AutoButtonColor = false, Visible = true,
+        }, gui)
+        round(float, 22)
+        outline(float, Color3.fromRGB(90, 90, 90))
+
+        minBtn.Activated:Connect(function()
+            lib:SetVisibility(false)
+        end)
+
+        -- 拖曳（標題列拖曳視窗、小按鈕拖曳 + 輕點開啟）
+        local dragTarget, dragStart, startPos, moved, isFloat
+
+        local function beginDrag(target, input, floatMode)
+            dragTarget = target
+            dragStart = Vector2.new(input.Position.X, input.Position.Y)
+            startPos = target.Position
+            moved = false
+            isFloat = floatMode
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    if dragTarget == target then
+                        dragTarget = nil
+                        if floatMode and not moved then
+                            lib:SetVisibility(not main.Visible)
+                        end
+                    end
+                end
+            end)
+        end
+
+        titleBar.InputBegan:Connect(function(input)
+            local t = input.UserInputType
+            if t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.Touch then
+                beginDrag(main, input, false)
+            end
+        end)
+
+        float.InputBegan:Connect(function(input)
+            local t = input.UserInputType
+            if t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.Touch then
+                beginDrag(float, input, true)
+            end
+        end)
+
+        UIS.InputChanged:Connect(function(input)
+            if not dragTarget then
+                return
+            end
+            local t = input.UserInputType
+            if t == Enum.UserInputType.MouseMovement or t == Enum.UserInputType.Touch then
+                local d = Vector2.new(input.Position.X, input.Position.Y) - dragStart
+                if d.Magnitude > 6 then
+                    moved = true
+                end
+                if moved or not isFloat then
+                    dragTarget.Position = UDim2.new(
+                        startPos.X.Scale, startPos.X.Offset + d.X,
+                        startPos.Y.Scale, startPos.Y.Offset + d.Y
+                    )
+                end
+            end
+        end)
+
+        -- ---------- 分頁 ----------
+        local Window = {}
+        local tabs = {}
+        local tabOrder = 0
+
+        local function selectTab(t)
+            for _, x in ipairs(tabs) do
+                local on = (x == t)
+                x.page.Visible = on
+                x.btn.BackgroundTransparency = on and 0 or 1
+                x.btn.TextColor3 = on and C.text or C.sub
+            end
+        end
+
+        function Window:CreateTab(name)
+            tabOrder += 1
+            local btn = new("TextButton", {
+                Size = UDim2.new(1, 0, 0, 32),
+                BackgroundColor3 = C.item, BackgroundTransparency = 1,
+                Text = name, Font = FONT, TextSize = 13, TextColor3 = C.sub,
+                AutoButtonColor = false, LayoutOrder = tabOrder,
+            }, tabList)
+            round(btn, 6)
+
+            local page = new("ScrollingFrame", {
+                Size = UDim2.new(1, 0, 1, 0),
+                BackgroundTransparency = 1, BorderSizePixel = 0,
+                ScrollBarThickness = 3, ScrollBarImageColor3 = Color3.fromRGB(90, 90, 90),
+                AutomaticCanvasSize = Enum.AutomaticSize.Y,
+                CanvasSize = UDim2.new(0, 0, 0, 0),
+                Visible = false,
+            }, pages)
+            new("UIListLayout", {Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder}, page)
+            new("UIPadding", {
+                PaddingTop = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8),
+                PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 10),
+            }, page)
+
+            local tab = {btn = btn, page = page}
+            table.insert(tabs, tab)
+            btn.Activated:Connect(function()
+                selectTab(tab)
+            end)
+            if #tabs == 1 then
+                selectTab(tab)
+            end
+
+            local Tab = {}
+            local order = 0
+            local function nextOrder()
+                order += 1
+                return order
+            end
+
+            local function label(parent, text, size, pos, align)
+                return new("TextLabel", {
+                    Size = size, Position = pos or UDim2.new(0, 0, 0, 0),
+                    BackgroundTransparency = 1, Text = text,
+                    Font = FONT, TextSize = 13, TextColor3 = C.text,
+                    TextXAlignment = align or Enum.TextXAlignment.Left,
+                    TextWrapped = true,
+                }, parent)
+            end
+
+            -- 區塊標題
+            function Tab:CreateSection(text)
+                new("TextLabel", {
+                    Size = UDim2.new(1, 0, 0, 22),
+                    BackgroundTransparency = 1, Text = string.upper(text),
+                    Font = FONT_B, TextSize = 11, TextColor3 = C.sub,
+                    TextXAlignment = Enum.TextXAlignment.Left,
+                    LayoutOrder = nextOrder(),
+                }, page)
+                return {}
+            end
+
+            -- 按鈕
+            function Tab:CreateButton(o)
+                local b = new("TextButton", {
+                    Size = UDim2.new(1, 0, 0, 38),
+                    BackgroundColor3 = C.item, AutoButtonColor = false,
+                    Text = o.Name, Font = FONT, TextSize = 13, TextColor3 = C.text,
+                    LayoutOrder = nextOrder(),
+                }, page)
+                round(b, 6)
+                outline(b)
+                b.MouseEnter:Connect(function() tween(b, {BackgroundColor3 = C.hover}) end)
+                b.MouseLeave:Connect(function() tween(b, {BackgroundColor3 = C.item}) end)
+                b.Activated:Connect(function()
+                    b.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+                    tween(b, {BackgroundColor3 = C.item}, 0.25)
+                    safe(o.Callback)
+                end)
+                return {}
+            end
+
+            -- 開關
+            function Tab:CreateToggle(o)
+                local state = o.CurrentValue and true or false
+                local row = new("TextButton", {
+                    Size = UDim2.new(1, 0, 0, 40),
+                    BackgroundColor3 = C.item, AutoButtonColor = false,
+                    Text = "", LayoutOrder = nextOrder(),
+                }, page)
+                round(row, 6)
+                outline(row)
+                label(row, o.Name, UDim2.new(1, -66, 1, 0), UDim2.new(0, 12, 0, 0))
+
+                local pill = new("Frame", {
+                    AnchorPoint = Vector2.new(1, 0.5),
+                    Position = UDim2.new(1, -12, 0.5, 0),
+                    Size = UDim2.fromOffset(38, 20),
+                    BackgroundColor3 = C.off, BorderSizePixel = 0,
+                }, row)
+                round(pill, 10)
+                local knob = new("Frame", {
+                    AnchorPoint = Vector2.new(0, 0.5),
+                    Position = UDim2.new(0, 3, 0.5, 0),
+                    Size = UDim2.fromOffset(14, 14),
+                    BackgroundColor3 = C.sub, BorderSizePixel = 0,
+                }, pill)
+                round(knob, 7)
+
+                local function render()
+                    if state then
+                        tween(pill, {BackgroundColor3 = C.text})
+                        tween(knob, {Position = UDim2.new(1, -17, 0.5, 0), BackgroundColor3 = C.bg})
+                    else
+                        tween(pill, {BackgroundColor3 = C.off})
+                        tween(knob, {Position = UDim2.new(0, 3, 0.5, 0), BackgroundColor3 = C.sub})
+                    end
+                end
+                render()
+
+                row.MouseEnter:Connect(function() tween(row, {BackgroundColor3 = C.hover}) end)
+                row.MouseLeave:Connect(function() tween(row, {BackgroundColor3 = C.item}) end)
+                row.Activated:Connect(function()
+                    state = not state
+                    render()
+                    safe(o.Callback, state)
+                end)
+
+                local self = {}
+                function self:Set(v)
+                    state = v and true or false
+                    render()
+                    safe(o.Callback, state)
+                end
+                return self
+            end
+
+            -- 數字 / 文字輸入
+            function Tab:CreateInput(o)
+                local row = new("Frame", {
+                    Size = UDim2.new(1, 0, 0, 40),
+                    BackgroundColor3 = C.item, LayoutOrder = nextOrder(),
+                }, page)
+                round(row, 6)
+                outline(row)
+                label(row, o.Name, UDim2.new(1, -134, 1, 0), UDim2.new(0, 12, 0, 0))
+
+                local box = new("TextBox", {
+                    AnchorPoint = Vector2.new(1, 0.5),
+                    Position = UDim2.new(1, -8, 0.5, 0),
+                    Size = UDim2.fromOffset(112, 26),
+                    BackgroundColor3 = C.bg, BorderSizePixel = 0,
+                    Text = "", PlaceholderText = o.PlaceholderText or "",
+                    PlaceholderColor3 = Color3.fromRGB(100, 100, 100),
+                    TextColor3 = C.text, Font = FONT, TextSize = 13,
+                    ClearTextOnFocus = false,
+                }, row)
+                round(box, 5)
+                outline(box)
+
+                -- 輸入完（按 Enter 或點到別處）就套用
+                box.FocusLost:Connect(function()
+                    safe(o.Callback, box.Text)
+                end)
+
+                local self = {}
+                function self:Set(text)
+                    box.Text = tostring(text)
+                    safe(o.Callback, box.Text)
+                end
+                return self
+            end
+
+            -- 下拉選單
+            function Tab:CreateDropdown(o)
+                local options = o.Options or {}
+                local current = nil
+                if type(o.CurrentOption) == "table" then
+                    current = o.CurrentOption[1]
+                elseif type(o.CurrentOption) == "string" then
+                    current = o.CurrentOption
+                end
+                local open = false
+
+                local holder = new("Frame", {
+                    Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+                    BackgroundColor3 = C.item, LayoutOrder = nextOrder(),
+                    ClipsDescendants = true,
+                }, page)
+                round(holder, 6)
+                outline(holder)
+                new("UIListLayout", {SortOrder = Enum.SortOrder.LayoutOrder}, holder)
+
+                local head = new("TextButton", {
+                    Size = UDim2.new(1, 0, 0, 40),
+                    BackgroundTransparency = 1, Text = "", AutoButtonColor = false,
+                    LayoutOrder = 1,
+                }, holder)
+                label(head, o.Name, UDim2.new(1, -150, 1, 0), UDim2.new(0, 12, 0, 0))
+                local valueLabel = new("TextLabel", {
+                    AnchorPoint = Vector2.new(1, 0.5),
+                    Position = UDim2.new(1, -28, 0.5, 0),
+                    Size = UDim2.new(0, 110, 0, 20),
+                    BackgroundTransparency = 1, Text = "",
+                    Font = FONT, TextSize = 12, TextColor3 = C.sub,
+                    TextXAlignment = Enum.TextXAlignment.Right,
+                    TextTruncate = Enum.TextTruncate.AtEnd,
+                }, head)
+                local arrow = new("TextLabel", {
+                    AnchorPoint = Vector2.new(1, 0.5),
+                    Position = UDim2.new(1, -10, 0.5, 0),
+                    Size = UDim2.fromOffset(14, 14),
+                    BackgroundTransparency = 1, Text = "▾",
+                    Font = FONT_B, TextSize = 14, TextColor3 = C.sub,
+                }, head)
+
+                local list = new("ScrollingFrame", {
+                    Size = UDim2.new(1, 0, 0, 0),
+                    BackgroundTransparency = 1, BorderSizePixel = 0,
+                    ScrollBarThickness = 3, ScrollBarImageColor3 = Color3.fromRGB(90, 90, 90),
+                    AutomaticCanvasSize = Enum.AutomaticSize.Y,
+                    CanvasSize = UDim2.new(0, 0, 0, 0),
+                    Visible = false, LayoutOrder = 2,
+                }, holder)
+                new("UIListLayout", {
+                    Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder,
+                    HorizontalAlignment = Enum.HorizontalAlignment.Center,
+                }, list)
+                new("UIPadding", {
+                    PaddingTop = UDim.new(0, 2), PaddingBottom = UDim.new(0, 8),
+                    PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8),
+                }, list)
+
+                local self = {}
+
+                local function render()
+                    valueLabel.Text = current or "未選擇"
+                    arrow.Text = open and "▴" or "▾"
+                    list.Visible = open
+                end
+
+                local function rebuild()
+                    for _, c in ipairs(list:GetChildren()) do
+                        if c:IsA("TextButton") then
+                            c:Destroy()
+                        end
+                    end
+                    if #options == 0 then
+                        new("TextButton", {
+                            Size = UDim2.new(1, 0, 0, 28),
+                            BackgroundColor3 = C.bg, AutoButtonColor = false,
+                            Text = "（沒有選項）", Font = FONT, TextSize = 12, TextColor3 = C.sub,
+                            LayoutOrder = 1,
+                        }, list)
+                    end
+                    for i, name in ipairs(options) do
+                        local b = new("TextButton", {
+                            Size = UDim2.new(1, 0, 0, 28),
+                            BackgroundColor3 = C.bg, AutoButtonColor = false,
+                            Text = name, Font = FONT, TextSize = 12,
+                            TextColor3 = (name == current) and C.text or C.sub,
+                            LayoutOrder = i,
+                        }, list)
+                        round(b, 5)
+                        outline(b)
+                        b.Activated:Connect(function()
+                            current = name
+                            open = false
+                            render()
+                            rebuild()
+                            safe(o.Callback, {name})
+                        end)
+                    end
+                    -- 選項太多時限制高度、可捲動
+                    local h = math.min(math.max(#options, 1) * 32 + 10, 170)
+                    list.Size = UDim2.new(1, 0, 0, h)
+                end
+
+                head.Activated:Connect(function()
+                    open = not open
+                    render()
+                end)
+
+                function self:Set(opt)
+                    if type(opt) == "table" then
+                        current = opt[1]
+                    else
+                        current = opt
+                    end
+                    render()
+                    rebuild()
+                    safe(o.Callback, {current})
+                end
+
+                function self:Refresh(newList)
+                    options = newList or {}
+                    local found = false
+                    for _, n in ipairs(options) do
+                        if n == current then
+                            found = true
+                            break
+                        end
+                    end
+                    if not found then
+                        current = nil
+                    end
+                    render()
+                    rebuild()
+                end
+
+                render()
+                rebuild()
+                return self
+            end
+
+            return Tab
+        end
+
+        return Window
+    end
+
+    return lib
+end
