@@ -1,3 +1,5 @@
+-- 主腳本（Auto clicker）：https://raw.githubusercontent.com/Kai090898/Kai-slap-battles-script/refs/heads/main/Auto%20clicker
+-- 主腳本會從 GitHub 的「卡依ui」載入這份介面，所以要把這份內容貼到 GitHub 的「卡依ui」才會生效
 -- ====================================================================
 --  卡依介面庫（純黑）— 用法：local UI = loadstring(game:HttpGet("網址"))()
 -- ====================================================================
@@ -12,8 +14,11 @@ do
         item = Color3.fromRGB(16, 16, 16),
         hover = Color3.fromRGB(30, 30, 30),
         stroke = Color3.fromRGB(42, 42, 42),
-        text = Color3.fromRGB(255, 255, 255),
-        sub = Color3.fromRGB(190, 190, 196),
+        text = Color3.fromRGB(0, 0, 0),       -- 所有文字：黑色
+        sub = Color3.fromRGB(0, 0, 0),        -- 次要文字：也是黑色
+        white = Color3.fromRGB(255, 255, 255),
+        knob = Color3.fromRGB(190, 190, 196),
+        light = Color3.fromRGB(235, 235, 240), -- 淺色底（讓黑字看得清楚）
         off = Color3.fromRGB(55, 55, 55),
     }
     -- 灰白色透明（玻璃質感）
@@ -162,7 +167,7 @@ do
             Size = UDim2.new(1, 0, 0, 0),
             Position = UDim2.new(0, 0, 0, -26),
             AutomaticSize = Enum.AutomaticSize.Y,
-            BackgroundColor3 = C.panel,
+            BackgroundColor3 = C.light,
             BorderSizePixel = 0,
             GroupTransparency = 1,
         }, slot)
@@ -187,7 +192,7 @@ do
         }, card)
         local bar = new("Frame", {
             Size = UDim2.new(1, 0, 0, 2),
-            BackgroundColor3 = C.text, BorderSizePixel = 0, LayoutOrder = 3,
+            BackgroundColor3 = C.bg, BorderSizePixel = 0, LayoutOrder = 3,
         }, card)
 
         -- 進場
@@ -431,7 +436,7 @@ do
             Name = "Float",
             Size = UDim2.fromOffset(44, 44),
             Position = UDim2.new(0, 10, 0.4, 0),
-            BackgroundColor3 = C.bg,
+            BackgroundColor3 = C.light,
             Text = "卡", TextColor3 = C.text, Font = FONT_B, TextSize = 20,
             AutoButtonColor = false, Visible = true,
         }, gui)
@@ -590,10 +595,10 @@ do
             for _, x in ipairs(tabs) do
                 local on = (x == t)
                 tween(x.btn, {
-                    BackgroundTransparency = on and 0.7 or 1,
-                    TextColor3 = on and C.text or C.sub,
+                    BackgroundTransparency = on and 0.6 or GLASS_T,
                 }, 0.2)
-                tween(x.bar, {Size = UDim2.new(0, 3, 0, on and 16 or 0)}, 0.25,
+                -- 使用中的項目：方框下面出現白色橫線
+                tween(x.bar, {Size = UDim2.new(on and 0.6 or 0, 0, 0, 2)}, 0.25,
                     Enum.EasingStyle.Back, Enum.EasingDirection.Out)
                 if on then
                     x.page.Visible = true
@@ -612,21 +617,23 @@ do
             tabOrder += 1
             local btn = new("TextButton", {
                 Size = UDim2.new(1, 0, 0, 32),
-                BackgroundColor3 = GLASS, BackgroundTransparency = 1,
-                Text = name, Font = FONT, TextSize = 13, TextColor3 = C.sub,
-                TextStrokeTransparency = 0.5,
+                BackgroundColor3 = GLASS, BackgroundTransparency = GLASS_T,
+                Text = name, Font = FONT, TextSize = 13, TextColor3 = C.text,
+                TextStrokeTransparency = 1,
                 AutoButtonColor = false, LayoutOrder = tabOrder,
             }, tabList)
             round(btn, 6)
+            glassOutline(btn)
             pressFx(btn, 0.95)
 
+            -- 白色底線（在方框下面）
             local bar = new("Frame", {
-                AnchorPoint = Vector2.new(0, 0.5),
-                Position = UDim2.new(0, 3, 0.5, 0),
-                Size = UDim2.new(0, 3, 0, 0),
-                BackgroundColor3 = C.text, BorderSizePixel = 0,
+                AnchorPoint = Vector2.new(0.5, 0),
+                Position = UDim2.new(0.5, 0, 1, 1),
+                Size = UDim2.new(0, 0, 0, 2),
+                BackgroundColor3 = C.white, BorderSizePixel = 0,
             }, btn)
-            round(bar, 2)
+            round(bar, 1)
 
             local page = new("ScrollingFrame", {
                 Size = UDim2.new(1, 0, 1, 0),
@@ -667,7 +674,7 @@ do
                     Size = size, Position = pos or UDim2.new(0, 0, 0, 0),
                     BackgroundTransparency = 1, Text = text,
                     Font = FONT, TextSize = 13, TextColor3 = C.text,
-                    TextStrokeTransparency = 0.5,
+                    TextStrokeTransparency = 1,
                     TextXAlignment = align or Enum.TextXAlignment.Left,
                     TextWrapped = true,
                 }, parent)
@@ -679,7 +686,7 @@ do
                     Size = UDim2.new(1, 0, 0, 22),
                     BackgroundTransparency = 1, Text = string.upper(text),
                     Font = FONT_B, TextSize = 11, TextColor3 = C.sub,
-                    TextStrokeTransparency = 0.5,
+                    TextStrokeTransparency = 1,
                     TextXAlignment = Enum.TextXAlignment.Left,
                     LayoutOrder = nextOrder(),
                 }, page)
@@ -696,8 +703,7 @@ do
                     Size = UDim2.new(1, 0, 0, 38),
                     BackgroundColor3 = GLASS, BackgroundTransparency = GLASS_T, AutoButtonColor = false,
                     Text = o.Name, Font = FONT, TextSize = 13, TextColor3 = C.text,
-                    TextStrokeTransparency = 0.5,
-                    TextStrokeTransparency = 0.5,
+                    TextStrokeTransparency = 1,
                     LayoutOrder = nextOrder(),
                 }, page)
                 round(b, 6)
@@ -741,18 +747,18 @@ do
                     AnchorPoint = Vector2.new(0, 0.5),
                     Position = UDim2.new(0, 3, 0.5, 0),
                     Size = UDim2.fromOffset(14, 14),
-                    BackgroundColor3 = C.sub, BorderSizePixel = 0,
+                    BackgroundColor3 = C.knob, BorderSizePixel = 0,
                 }, pill)
                 round(knob, 7)
 
                 local function render()
                     if state then
-                        tween(pill, {BackgroundColor3 = C.text}, 0.2)
+                        tween(pill, {BackgroundColor3 = C.white}, 0.2)
                         tween(knob, {Position = UDim2.new(1, -17, 0.5, 0), BackgroundColor3 = C.bg}, 0.28,
                             Enum.EasingStyle.Back, Enum.EasingDirection.Out)
                     else
                         tween(pill, {BackgroundColor3 = C.off}, 0.2)
-                        tween(knob, {Position = UDim2.new(0, 3, 0.5, 0), BackgroundColor3 = C.sub}, 0.28,
+                        tween(knob, {Position = UDim2.new(0, 3, 0.5, 0), BackgroundColor3 = C.knob}, 0.28,
                             Enum.EasingStyle.Back, Enum.EasingDirection.Out)
                     end
                 end
@@ -792,9 +798,9 @@ do
                     AnchorPoint = Vector2.new(1, 0.5),
                     Position = UDim2.new(1, -8, 0.5, 0),
                     Size = UDim2.fromOffset(112, 26),
-                    BackgroundColor3 = C.bg, BorderSizePixel = 0,
+                    BackgroundColor3 = C.light, BorderSizePixel = 0,
                     Text = "", PlaceholderText = o.PlaceholderText or "",
-                    PlaceholderColor3 = Color3.fromRGB(100, 100, 100),
+                    PlaceholderColor3 = Color3.fromRGB(110, 110, 110),
                     TextColor3 = C.text, Font = FONT, TextSize = 13,
                     ClearTextOnFocus = false,
                 }, row)
@@ -919,7 +925,7 @@ do
                     if #options == 0 then
                         new("TextButton", {
                             Size = UDim2.new(1, 0, 0, 28),
-                            BackgroundColor3 = C.bg, AutoButtonColor = false,
+                            BackgroundColor3 = C.light, AutoButtonColor = false,
                             Text = "（沒有選項）", Font = FONT, TextSize = 12, TextColor3 = C.sub,
                             LayoutOrder = 1,
                         }, list)
@@ -927,9 +933,9 @@ do
                     for i, name in ipairs(options) do
                         local b = new("TextButton", {
                             Size = UDim2.new(1, 0, 0, 28),
-                            BackgroundColor3 = C.bg, AutoButtonColor = false,
-                            Text = name, Font = FONT, TextSize = 12,
-                            TextColor3 = (name == current) and C.text or C.sub,
+                            BackgroundColor3 = C.light, AutoButtonColor = false,
+                            Text = name, Font = (name == current) and FONT_B or FONT, TextSize = 12,
+                            TextColor3 = C.text,
                             LayoutOrder = i,
                         }, list)
                         round(b, 5)
