@@ -777,6 +777,10 @@ local function regDropdown(key, el, get, set)
     table.insert(reg, {key = key, kind = "dropdown", el = el, get = get, set = set})
 end
 
+local function regText(key, el, get, set)
+    table.insert(reg, {key = key, kind = "text", el = el, get = get, set = set})
+end
+
 local function readConfig()
     if not (isfile and readfile) then
         return nil
@@ -845,6 +849,11 @@ local function loadConfig(quiet)
             pcall(function()
                 r.set(v)
                 r.el:Set({v})
+            end)
+        elseif v ~= nil and r.kind == "text" and type(v) == "string" then
+            pcall(function()
+                r.set(v)
+                r.el:Set(v)
             end)
         end
     end
@@ -923,6 +932,10 @@ local EN = {
     ["掛機"] = "Farming",
     ["自動撿花（走過去）"] = "Auto Collect Petals (walks)",
     ["撿花範圍（輸入數字）"] = "Collect Range (number)",
+    ["撿完花走回掛機點"] = "Return to Farm Spot",
+    ["把目前位置設為掛機點"] = "Set Current Position as Farm Spot",
+    ["掛機點座標（x, y, z）"] = "Farm Spot Coordinates (x, y, z)",
+    ["預設 652, 4, -598"] = "Default 652, 4, -598",
     ["預設 120，只追這個距離內的花"] = "Default 120, only chases petals within this distance",
     ["設定檔"] = "Config",
     ["介面與聲音"] = "UI & Sound",
@@ -1566,6 +1579,8 @@ ModTab:CreateSection("掛機")
 do
     local petalOn = false
     local petalRange = 120
+    local goHomeOn = true                            -- 撿完花走回掛機點
+    local homePos = Vector3.new(652, 4, -598)        -- 掛機區的重生點
     local skipUntil = setmetatable({}, {__mode = "k"})  -- 撿不到的花先跳過一陣子
 
     -- ===== 避開傳送陣 =====
@@ -1800,6 +1815,33 @@ do
         end
     end
 
+    -- 走回掛機點；途中如果範圍內出現花，就立刻停下來（回到主迴圈去追花）
+    local function walkHome(hum, root)
+        local t0 = tick()
+        local lastPos, lastCheck = root.Position, tick()
+        while petalOn and goHomeOn and hum.Health > 0 and tick() - t0 < 30 do
+            local off = homePos - root.Position
+            local flat = Vector3.new(off.X, 0, off.Z).Magnitude
+            if flat < 3 then
+                break
+            end
+            if nearestPetal(root) then
+                return
+            end
+
+            local wp = detour(root.Position, homePos)
+            hum:MoveTo(wp or homePos)
+
+            if tick() - lastCheck > 0.7 then
+                if (root.Position - lastPos).Magnitude < 1 then
+                    hum.Jump = true
+                end
+                lastPos, lastCheck = root.Position, tick()
+            end
+            task.wait(0.15)
+        end
+    end
+
     task.spawn(function()
         local wasOn = false
         while true do
@@ -1811,6 +1853,13 @@ do
                     local petal = nearestPetal(root)
                     if petal then
                         pcall(walkTo, hum, root, petal)
+                    elseif goHomeOn then
+                        local off = homePos - root.Position
+                        if Vector3.new(off.X, 0, off.Z).Magnitude >= 3 then
+                            pcall(walkHome, hum, root)
+                        else
+                            task.wait(0.3)
+                        end
                     else
                         task.wait(0.3)
                     end
@@ -1831,11 +1880,20 @@ do
         end
     end)
 
+    local autoNoclip = false  -- 穿透是不是由「自動撿花」幫你打開的
     local tPetal = ModTab:CreateToggle({
         Name = "自動撿花（走過去）",
         CurrentValue = false,
         Callback = function(v)
             petalOn = v
+            -- 啟動時自動開穿透，讓角色能直接穿過物件走過去；關閉時只還原自己開的那次
+            if v and not noclipOn then
+                autoNoclip = true
+                pcall(function() tNoclip:Set(true) end)
+            elseif not v and autoNoclip then
+                autoNoclip = false
+                pcall(function() tNoclip:Set(false) end)
+            end
         end,
     })
     regToggle("autoPetal", tPetal, function() return petalOn end)
@@ -1857,6 +1915,60 @@ do
         petalRange = v
     end)
 
+    local tGoHome = ModTab:CreateToggle({
+        Name = "撿完花走回掛機點",
+        CurrentValue = true,
+        Callback = function(v)
+            goHomeOn = v
+        end,
+    })
+    regToggle("petalGoHome", tGoHome, function() return goHomeOn end)
+
+    local function homeText()
+        return string.format("%.1f, %.1f, %.1f", homePos.X, homePos.Y, homePos.Z)
+    end
+
+    local function parseHome(text)
+        local x, y, z = tostring(text):match("(-?%d+%.?%d*)%s*[,%s]%s*(-?%d+%.?%d*)%s*[,%s]%s*(-?%d+%.?%d*)")
+        x, y, z = tonumber(x), tonumber(y), tonumber(z)
+        if x and y and z then
+            return Vector3.new(x, y, z)
+        end
+    end
+
+    local iHome = ModTab:CreateInput({
+        Name = "掛機點座標（x, y, z）",
+        PlaceholderText = "預設 652, 4, -598",
+        Callback = function(text)
+            local v = parseHome(text)
+            if v then
+                homePos = v
+                notify("已設定掛機點", "(" .. homeText() .. ")")
+            else
+                notify("輸入錯誤", "請輸入三個數字，例如 652, 4, -598")
+            end
+        end,
+    })
+    regText("petalHome", iHome, homeText, function(v)
+        local pv = parseHome(v)
+        if pv then
+            homePos = pv
+        end
+    end)
+
+    ModTab:CreateButton({
+        Name = "把目前位置設為掛機點",
+        Callback = function()
+            local root = getRoot()
+            if root then
+                homePos = root.Position
+                notify("已設定掛機點", "(" .. homeText() .. ")")
+                pcall(function() iHome:Set(homeText()) end)
+            else
+                notify("設定失敗", "找不到角色")
+            end
+        end,
+    })
 end
 
 -- 其他
