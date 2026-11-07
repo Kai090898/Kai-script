@@ -1,5 +1,5 @@
 -- ====================================================================
---  卡依介面庫（白底黑字）— 用法：local UI = loadstring(game:HttpGet("網址"))()
+--  卡依介面庫（純黑）— 用法：local UI = loadstring(game:HttpGet("網址"))()
 -- ====================================================================
 do
     local UIS = game:GetService("UserInputService")
@@ -7,15 +7,19 @@ do
     local Players = game:GetService("Players")
 
     local C = {
-        bg = Color3.fromRGB(255, 255, 255),
-        panel = Color3.fromRGB(245, 245, 245),
-        item = Color3.fromRGB(235, 235, 235),
-        hover = Color3.fromRGB(220, 220, 220),
-        stroke = Color3.fromRGB(200, 200, 200),
-        text = Color3.fromRGB(0, 0, 0),
-        sub = Color3.fromRGB(0, 0, 0),
-        off = Color3.fromRGB(190, 190, 190),
+        bg = Color3.fromRGB(0, 0, 0),
+        panel = Color3.fromRGB(8, 8, 8),
+        item = Color3.fromRGB(16, 16, 16),
+        hover = Color3.fromRGB(30, 30, 30),
+        stroke = Color3.fromRGB(42, 42, 42),
+        text = Color3.fromRGB(255, 255, 255),
+        sub = Color3.fromRGB(190, 190, 196),
+        off = Color3.fromRGB(55, 55, 55),
     }
+    -- 灰白色透明（玻璃質感）
+    local GLASS = Color3.fromRGB(225, 225, 232)
+    local GLASS_T = 0.82       -- 平常的透明度
+    local GLASS_HOVER_T = 0.68 -- 滑過去時
     local FONT = Enum.Font.GothamMedium
     local FONT_B = Enum.Font.GothamBold
 
@@ -42,8 +46,34 @@ do
         }, o)
     end
 
-    local function tween(o, props, t)
-        TweenService:Create(o, TweenInfo.new(t or 0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), props):Play()
+    local function glassOutline(o)
+        new("UIStroke", {
+            Color = Color3.fromRGB(255, 255, 255),
+            Transparency = 0.75,
+            Thickness = 1,
+            ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+        }, o)
+    end
+
+    local function tween(o, props, t, style, dir)
+        TweenService:Create(o, TweenInfo.new(
+            t or 0.15,
+            style or Enum.EasingStyle.Quad,
+            dir or Enum.EasingDirection.Out
+        ), props):Play()
+    end
+
+    -- 按下去會縮一下、放開彈回來
+    local function pressFx(btn, amount)
+        local sc = new("UIScale", {Scale = 1}, btn)
+        local function up()
+            tween(sc, {Scale = 1}, 0.25, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+        end
+        btn.MouseButton1Down:Connect(function()
+            tween(sc, {Scale = amount or 0.97}, 0.08)
+        end)
+        btn.MouseButton1Up:Connect(up)
+        btn.MouseLeave:Connect(up)
     end
 
     local function safe(cb, ...)
@@ -80,25 +110,69 @@ do
 
     local lib = {}
     local main, float, notifyHolder
+    local shown = false
+    local closed = false
+    local glassItems = {}
+    local glassOn = false
+    local connections = {}
+    local closeCallbacks = {}
 
-    -- ---------- 通知 ----------
+    local function track(conn)
+        table.insert(connections, conn)
+        return conn
+    end
+
+    local function glassify(obj, t)
+        table.insert(glassItems, {o = obj, t = t})
+        if glassOn then
+            obj.BackgroundTransparency = t
+        end
+    end
+
+    local function setGlass(on)
+        glassOn = on
+        for i = #glassItems, 1, -1 do
+            local g = glassItems[i]
+            if g.o.Parent then
+                tween(g.o, {BackgroundTransparency = on and g.t or 0}, 0.3)
+            else
+                table.remove(glassItems, i)
+            end
+        end
+    end
+
+    function lib:OnClose(fn)
+        table.insert(closeCallbacks, fn)
+    end
+
+    -- ---------- 通知（滑入、淡入淡出、倒數條） ----------
     function lib:Notify(o)
         if not notifyHolder then
             return
         end
-        local card = new("Frame", {
+        local dur = o.Duration or 3
+
+        local slot = new("Frame", {
             Size = UDim2.new(1, 0, 0, 0),
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1,
+        }, notifyHolder)
+
+        local card = new("CanvasGroup", {
+            Size = UDim2.new(1, 0, 0, 0),
+            Position = UDim2.new(0, 0, 0, -26),
             AutomaticSize = Enum.AutomaticSize.Y,
             BackgroundColor3 = C.panel,
             BorderSizePixel = 0,
-        }, notifyHolder)
+            GroupTransparency = 1,
+        }, slot)
         round(card, 8)
         outline(card, Color3.fromRGB(70, 70, 70))
         new("UIPadding", {
             PaddingTop = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8),
             PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10),
         }, card)
-        new("UIListLayout", {Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder}, card)
+        new("UIListLayout", {Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder}, card)
         new("TextLabel", {
             Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
             BackgroundTransparency = 1, Text = tostring(o.Title or ""),
@@ -111,23 +185,65 @@ do
             Font = FONT, TextSize = 12, TextColor3 = C.sub,
             TextXAlignment = Enum.TextXAlignment.Left, TextWrapped = true, LayoutOrder = 2,
         }, card)
-        task.delay(o.Duration or 3, function()
+        local bar = new("Frame", {
+            Size = UDim2.new(1, 0, 0, 2),
+            BackgroundColor3 = C.text, BorderSizePixel = 0, LayoutOrder = 3,
+        }, card)
+
+        -- 進場
+        tween(card, {GroupTransparency = 0, Position = UDim2.new(0, 0, 0, 0)}, 0.3,
+            Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+        TweenService:Create(bar, TweenInfo.new(dur, Enum.EasingStyle.Linear),
+            {Size = UDim2.new(0, 0, 0, 2)}):Play()
+
+        -- 退場
+        task.delay(dur, function()
             if card.Parent then
-                card:Destroy()
+                tween(card, {GroupTransparency = 1, Position = UDim2.new(0, 0, 0, -26)}, 0.25,
+                    Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+                task.delay(0.27, function()
+                    if slot.Parent then
+                        slot:Destroy()
+                    end
+                end)
             end
         end)
     end
 
-    -- ---------- 顯示 / 隱藏 ----------
+    -- ---------- 顯示 / 隱藏（縮放 + 淡入淡出） ----------
+    local visToken = 0
     function lib:SetVisibility(v)
-        if main then
-            main.Visible = v and true or false
+        if not main then
+            return
+        end
+        v = v and true or false
+        shown = v
+        visToken += 1
+        local token = visToken
+        local sc = main:FindFirstChild("WinScale")
+
+        if v then
+            main.Visible = true
+            tween(main, {GroupTransparency = 0}, 0.22)
+            if sc then
+                tween(sc, {Scale = 1}, 0.32, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+            end
+        else
+            tween(main, {GroupTransparency = 1}, 0.18)
+            if sc then
+                tween(sc, {Scale = 0.9}, 0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+            end
+            task.delay(0.2, function()
+                if token == visToken and main then
+                    main.Visible = false
+                end
+            end)
         end
     end
 
     -- 判斷某個螢幕座標是否被選單蓋住
     function lib:IsOverMenu(x, y)
-        if not main or not main.Visible then
+        if not main or not shown then
             return false
         end
         local p, s = main.AbsolutePosition, main.AbsoluteSize
@@ -135,9 +251,50 @@ do
         return x >= p.X - m and x <= p.X + s.X + m and y >= p.Y - m and y <= p.Y + s.Y + m
     end
 
+    -- 關閉整個腳本：淡出 → 斷開所有連線 → 銷毀 GUI
+    local guiRef
+    function lib:Destroy()
+        if closed then
+            return
+        end
+        closed = true
+        shown = false
+        visToken += 1
+
+        -- 通知外部腳本做清理（關掉外面的迴圈、功能等）
+        for _, fn in ipairs(closeCallbacks) do
+            safe(fn)
+        end
+
+        local g = guiRef
+        local m, f, n = main, float, notifyHolder
+        local sc = m and m:FindFirstChild("WinScale")
+        if m and m.Visible then
+            tween(m, {GroupTransparency = 1}, 0.18)
+            if sc then
+                tween(sc, {Scale = 0.9}, 0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+            end
+        end
+        if f then
+            tween(f, {BackgroundTransparency = 1, TextTransparency = 1}, 0.18)
+        end
+
+        task.delay(0.2, function()
+            for _, c in ipairs(connections) do
+                pcall(function() c:Disconnect() end)
+            end
+            table.clear(connections)
+            if g then
+                g:Destroy()
+            end
+            main, float, notifyHolder, guiRef = nil, nil, nil, nil
+        end)
+    end
+
     -- ---------- 視窗 ----------
     function lib:CreateWindow(cfg)
         cleanup("KaiUI")
+        closed = false
 
         local gui = new("ScreenGui", {
             Name = "KaiUI",
@@ -147,44 +304,82 @@ do
             ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
         })
         mount(gui)
+        guiRef = gui
 
         local vp = workspace.CurrentCamera.ViewportSize
         local w = math.min(520, vp.X - 20)
         local h = math.min(330, vp.Y - 20)
 
-        main = new("Frame", {
+        main = new("CanvasGroup", {
             Name = "Main",
             AnchorPoint = Vector2.new(0.5, 0.5),
             Position = UDim2.new(0, w / 2 + 10, 0.5, 0),
             Size = UDim2.fromOffset(w, h),
             BackgroundColor3 = C.bg,
             BorderSizePixel = 0,
-            ClipsDescendants = true,
+            GroupTransparency = 1,
+            Active = true,
         }, gui)
         round(main, 10)
         outline(main, Color3.fromRGB(60, 60, 60))
+        new("UIScale", {Name = "WinScale", Scale = 0.9}, main)
+
+        -- 動態背景（鋪滿整個視窗，放在最底層；兩層圖片互相淡入淡出，畫面更連貫）
+        local function makeBg(name)
+            return new("ImageLabel", {
+                Name = name,
+                Position = UDim2.new(0, 0, 0, 0),
+                Size = UDim2.new(1, 0, 1, 0),
+                BackgroundTransparency = 1,
+                BorderSizePixel = 0,
+                ScaleType = Enum.ScaleType.Crop,
+                ImageTransparency = 0,
+                Visible = false,
+                ZIndex = 0,
+                Active = false,
+            }, main)
+        end
+        local bgImg = makeBg("BgGif")
+        local bgImg2 = makeBg("BgGif2")
+        local bgLoaded, bgWanted = false, true
 
         -- 標題列
         local titleBar = new("Frame", {
             Size = UDim2.new(1, 0, 0, 36),
-            BackgroundColor3 = C.panel,
+            BackgroundColor3 = GLASS,
+            BackgroundTransparency = GLASS_T,
             BorderSizePixel = 0,
         }, main)
-        new("TextLabel", {
-            Size = UDim2.new(1, -60, 1, 0), Position = UDim2.new(0, 14, 0, 0),
+        local titleLabel = new("TextLabel", {
+            Size = UDim2.new(1, -100, 1, 0), Position = UDim2.new(0, 14, 0, 0),
             BackgroundTransparency = 1, Text = cfg.Name or "UI",
             Font = FONT_B, TextSize = 15, TextColor3 = C.text,
             TextXAlignment = Enum.TextXAlignment.Left,
         }, titleBar)
         local minBtn = new("TextButton", {
-            Size = UDim2.fromOffset(40, 36), Position = UDim2.new(1, -40, 0, 0),
+            Size = UDim2.fromOffset(40, 36), Position = UDim2.new(1, -80, 0, 0),
             BackgroundTransparency = 1, Text = "—", Font = FONT_B,
             TextSize = 16, TextColor3 = C.sub, AutoButtonColor = false,
         }, titleBar)
+        local closeBtn = new("TextButton", {
+            Name = "Close",
+            Size = UDim2.fromOffset(40, 36), Position = UDim2.new(1, -40, 0, 0),
+            BackgroundTransparency = 1, Text = "✕", Font = FONT_B,
+            TextSize = 15, TextColor3 = C.sub, AutoButtonColor = false,
+        }, titleBar)
+        closeBtn.MouseEnter:Connect(function()
+            tween(closeBtn, {TextColor3 = Color3.fromRGB(255, 90, 90)}, 0.15)
+        end)
+        closeBtn.MouseLeave:Connect(function()
+            tween(closeBtn, {TextColor3 = C.sub}, 0.15)
+        end)
         new("Frame", {
             Size = UDim2.new(1, 0, 0, 1), Position = UDim2.new(0, 0, 0, 36),
             BackgroundColor3 = C.stroke, BorderSizePixel = 0,
         }, main)
+
+        pressFx(minBtn, 0.85)
+        pressFx(closeBtn, 0.85)
 
         -- 內容區
         local body = new("Frame", {
@@ -194,11 +389,13 @@ do
 
         local tabList = new("ScrollingFrame", {
             Size = UDim2.new(0, 104, 1, 0),
+            Active = true,
             BackgroundColor3 = C.bg, BorderSizePixel = 0,
             ScrollBarThickness = 0,
             AutomaticCanvasSize = Enum.AutomaticSize.Y,
             CanvasSize = UDim2.new(0, 0, 0, 0),
         }, body)
+        glassify(tabList, 1)
         new("UIListLayout", {Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder}, tabList)
         new("UIPadding", {
             PaddingTop = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8),
@@ -240,10 +437,17 @@ do
         }, gui)
         round(float, 22)
         outline(float, Color3.fromRGB(90, 90, 90))
+        pressFx(float, 0.88)
 
         minBtn.Activated:Connect(function()
             lib:SetVisibility(false)
         end)
+        closeBtn.Activated:Connect(function()
+            lib:Destroy()
+        end)
+        if cfg.OnClose then
+            lib:OnClose(cfg.OnClose)
+        end
 
         -- 拖曳（標題列拖曳視窗、小按鈕拖曳 + 輕點開啟）
         local dragTarget, dragStart, startPos, moved, isFloat
@@ -259,7 +463,7 @@ do
                     if dragTarget == target then
                         dragTarget = nil
                         if floatMode and not moved then
-                            lib:SetVisibility(not main.Visible)
+                            lib:SetVisibility(not shown)
                         end
                     end
                 end
@@ -280,7 +484,7 @@ do
             end
         end)
 
-        UIS.InputChanged:Connect(function(input)
+        track(UIS.InputChanged:Connect(function(input)
             if not dragTarget then
                 return
             end
@@ -297,19 +501,110 @@ do
                     )
                 end
             end
-        end)
+        end))
 
         -- ---------- 分頁 ----------
         local Window = {}
+        function Window:SetTitle(text)
+            titleLabel.Text = tostring(text)
+        end
+
+        -- 動態背景：o = {Url, Frames, Cols, FrameW, FrameH, FPS, Transparency, CacheName}
+        function Window:SetBackgroundGif(o)
+            task.spawn(function()
+                local getAsset = getcustomasset or getsynasset
+                if not (writefile and getAsset) then
+                    warn("[卡依腳本] 這個執行器不支援 writefile / getcustomasset，無法顯示動態背景")
+                    return
+                end
+                local name = o.CacheName or "KaiUI_bg.png"
+                local ok, asset = pcall(function()
+                    if not (isfile and isfile(name)) then
+                        local data = game:HttpGet(o.Url)
+                        if #data < 1000 or data:sub(2, 4) ~= "PNG" then
+                            error("下載的不是有效的 PNG")
+                        end
+                        writefile(name, data)
+                    end
+                    return getAsset(name)
+                end)
+                if not ok or not asset then
+                    warn("[卡依腳本] 動態背景載入失敗：" .. tostring(asset))
+                    return
+                end
+
+                local baseT = o.Transparency or 0
+                for _, img in ipairs({bgImg, bgImg2}) do
+                    img.Image = asset
+                    img.ImageRectSize = Vector2.new(o.FrameW, o.FrameH)
+                end
+                bgImg.ImageTransparency = baseT
+                bgImg2.ImageTransparency = 1
+                bgLoaded = true
+                bgImg.Visible = bgWanted
+                bgImg2.Visible = bgWanted
+                setGlass(bgWanted)
+
+                local frames, cols = o.Frames, o.Cols
+                local fps = o.FPS or 14
+                local t0 = os.clock()
+                local lastI = -1
+                local function rectOf(n)
+                    return Vector2.new((n % cols) * o.FrameW, math.floor(n / cols) * o.FrameH)
+                end
+                -- 每一幀都計算目前在第幾張和第幾張之間，把下一張疊上去慢慢淡入
+                track(game:GetService("RunService").RenderStepped:Connect(function()
+                    if not (shown and bgWanted) then
+                        return
+                    end
+                    local pos = ((os.clock() - t0) * fps) % frames
+                    local i = math.floor(pos)
+                    local f = pos - i
+                    if i ~= lastI then
+                        lastI = i
+                        bgImg.ImageRectOffset = rectOf(i)
+                        bgImg2.ImageRectOffset = rectOf((i + 1) % frames)
+                    end
+                    bgImg2.ImageTransparency = 1 - f * (1 - baseT)
+                end))
+            end)
+        end
+
+        function Window:SetBackgroundEnabled(v)
+            bgWanted = v and true or false
+            if bgLoaded then
+                bgImg.Visible = bgWanted
+                bgImg2.Visible = bgWanted
+                setGlass(bgWanted)
+            end
+        end
         local tabs = {}
         local tabOrder = 0
 
-        local function selectTab(t)
+        local current
+        local function selectTab(t, animate)
+            if current == t then
+                return
+            end
+            current = t
             for _, x in ipairs(tabs) do
                 local on = (x == t)
-                x.page.Visible = on
-                x.btn.BackgroundTransparency = on and 0 or 1
-                x.btn.TextColor3 = on and C.text or C.sub
+                tween(x.btn, {
+                    BackgroundTransparency = on and 0.7 or 1,
+                    TextColor3 = on and C.text or C.sub,
+                }, 0.2)
+                tween(x.bar, {Size = UDim2.new(0, 3, 0, on and 16 or 0)}, 0.25,
+                    Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+                if on then
+                    x.page.Visible = true
+                    if animate then
+                        x.page.Position = UDim2.new(0, 0, 0, 14)
+                        tween(x.page, {Position = UDim2.new(0, 0, 0, 0)}, 0.3,
+                            Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+                    end
+                else
+                    x.page.Visible = false
+                end
             end
         end
 
@@ -317,14 +612,25 @@ do
             tabOrder += 1
             local btn = new("TextButton", {
                 Size = UDim2.new(1, 0, 0, 32),
-                BackgroundColor3 = C.item, BackgroundTransparency = 1,
+                BackgroundColor3 = GLASS, BackgroundTransparency = 1,
                 Text = name, Font = FONT, TextSize = 13, TextColor3 = C.sub,
+                TextStrokeTransparency = 0.5,
                 AutoButtonColor = false, LayoutOrder = tabOrder,
             }, tabList)
             round(btn, 6)
+            pressFx(btn, 0.95)
+
+            local bar = new("Frame", {
+                AnchorPoint = Vector2.new(0, 0.5),
+                Position = UDim2.new(0, 3, 0.5, 0),
+                Size = UDim2.new(0, 3, 0, 0),
+                BackgroundColor3 = C.text, BorderSizePixel = 0,
+            }, btn)
+            round(bar, 2)
 
             local page = new("ScrollingFrame", {
                 Size = UDim2.new(1, 0, 1, 0),
+                Active = true,
                 BackgroundTransparency = 1, BorderSizePixel = 0,
                 ScrollBarThickness = 3, ScrollBarImageColor3 = Color3.fromRGB(90, 90, 90),
                 AutomaticCanvasSize = Enum.AutomaticSize.Y,
@@ -337,16 +643,19 @@ do
                 PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 10),
             }, page)
 
-            local tab = {btn = btn, page = page}
+            local tab = {btn = btn, page = page, bar = bar}
             table.insert(tabs, tab)
             btn.Activated:Connect(function()
-                selectTab(tab)
+                selectTab(tab, true)
             end)
             if #tabs == 1 then
-                selectTab(tab)
+                selectTab(tab, false)
             end
 
             local Tab = {}
+            function Tab:SetName(text)
+                btn.Text = tostring(text)
+            end
             local order = 0
             local function nextOrder()
                 order += 1
@@ -358,6 +667,7 @@ do
                     Size = size, Position = pos or UDim2.new(0, 0, 0, 0),
                     BackgroundTransparency = 1, Text = text,
                     Font = FONT, TextSize = 13, TextColor3 = C.text,
+                    TextStrokeTransparency = 0.5,
                     TextXAlignment = align or Enum.TextXAlignment.Left,
                     TextWrapped = true,
                 }, parent)
@@ -365,34 +675,46 @@ do
 
             -- 區塊標題
             function Tab:CreateSection(text)
-                new("TextLabel", {
+                local secLabel = new("TextLabel", {
                     Size = UDim2.new(1, 0, 0, 22),
                     BackgroundTransparency = 1, Text = string.upper(text),
                     Font = FONT_B, TextSize = 11, TextColor3 = C.sub,
+                    TextStrokeTransparency = 0.5,
                     TextXAlignment = Enum.TextXAlignment.Left,
                     LayoutOrder = nextOrder(),
                 }, page)
-                return {}
+                local sec = {}
+                function sec:SetName(t)
+                    secLabel.Text = string.upper(tostring(t))
+                end
+                return sec
             end
 
             -- 按鈕
             function Tab:CreateButton(o)
                 local b = new("TextButton", {
                     Size = UDim2.new(1, 0, 0, 38),
-                    BackgroundColor3 = C.item, AutoButtonColor = false,
+                    BackgroundColor3 = GLASS, BackgroundTransparency = GLASS_T, AutoButtonColor = false,
                     Text = o.Name, Font = FONT, TextSize = 13, TextColor3 = C.text,
+                    TextStrokeTransparency = 0.5,
+                    TextStrokeTransparency = 0.5,
                     LayoutOrder = nextOrder(),
                 }, page)
                 round(b, 6)
-                outline(b)
-                b.MouseEnter:Connect(function() tween(b, {BackgroundColor3 = C.hover}) end)
-                b.MouseLeave:Connect(function() tween(b, {BackgroundColor3 = C.item}) end)
+                glassOutline(b)
+                pressFx(b, 0.97)
+                b.MouseEnter:Connect(function() tween(b, {BackgroundTransparency = GLASS_HOVER_T}) end)
+                b.MouseLeave:Connect(function() tween(b, {BackgroundTransparency = GLASS_T}) end)
                 b.Activated:Connect(function()
-                    b.BackgroundColor3 = Color3.fromRGB(200, 200, 200)
-                    tween(b, {BackgroundColor3 = C.item}, 0.25)
+                    b.BackgroundTransparency = 0.4
+                    tween(b, {BackgroundTransparency = GLASS_T}, 0.25)
                     safe(o.Callback)
                 end)
-                return {}
+                local self = {}
+                function self:SetName(t)
+                    b.Text = tostring(t)
+                end
+                return self
             end
 
             -- 開關
@@ -400,12 +722,13 @@ do
                 local state = o.CurrentValue and true or false
                 local row = new("TextButton", {
                     Size = UDim2.new(1, 0, 0, 40),
-                    BackgroundColor3 = C.item, AutoButtonColor = false,
+                    BackgroundColor3 = GLASS, BackgroundTransparency = GLASS_T, AutoButtonColor = false,
                     Text = "", LayoutOrder = nextOrder(),
                 }, page)
                 round(row, 6)
-                outline(row)
-                label(row, o.Name, UDim2.new(1, -66, 1, 0), UDim2.new(0, 12, 0, 0))
+                glassOutline(row)
+                pressFx(row, 0.98)
+                local nameLbl = label(row, o.Name, UDim2.new(1, -66, 1, 0), UDim2.new(0, 12, 0, 0))
 
                 local pill = new("Frame", {
                     AnchorPoint = Vector2.new(1, 0.5),
@@ -424,17 +747,19 @@ do
 
                 local function render()
                     if state then
-                        tween(pill, {BackgroundColor3 = C.text})
-                        tween(knob, {Position = UDim2.new(1, -17, 0.5, 0), BackgroundColor3 = C.bg})
+                        tween(pill, {BackgroundColor3 = C.text}, 0.2)
+                        tween(knob, {Position = UDim2.new(1, -17, 0.5, 0), BackgroundColor3 = C.bg}, 0.28,
+                            Enum.EasingStyle.Back, Enum.EasingDirection.Out)
                     else
-                        tween(pill, {BackgroundColor3 = C.off})
-                        tween(knob, {Position = UDim2.new(0, 3, 0.5, 0), BackgroundColor3 = C.sub})
+                        tween(pill, {BackgroundColor3 = C.off}, 0.2)
+                        tween(knob, {Position = UDim2.new(0, 3, 0.5, 0), BackgroundColor3 = C.sub}, 0.28,
+                            Enum.EasingStyle.Back, Enum.EasingDirection.Out)
                     end
                 end
                 render()
 
-                row.MouseEnter:Connect(function() tween(row, {BackgroundColor3 = C.hover}) end)
-                row.MouseLeave:Connect(function() tween(row, {BackgroundColor3 = C.item}) end)
+                row.MouseEnter:Connect(function() tween(row, {BackgroundTransparency = GLASS_HOVER_T}) end)
+                row.MouseLeave:Connect(function() tween(row, {BackgroundTransparency = GLASS_T}) end)
                 row.Activated:Connect(function()
                     state = not state
                     render()
@@ -442,6 +767,9 @@ do
                 end)
 
                 local self = {}
+                function self:SetName(t)
+                    nameLbl.Text = tostring(t)
+                end
                 function self:Set(v)
                     state = v and true or false
                     render()
@@ -454,11 +782,11 @@ do
             function Tab:CreateInput(o)
                 local row = new("Frame", {
                     Size = UDim2.new(1, 0, 0, 40),
-                    BackgroundColor3 = C.item, LayoutOrder = nextOrder(),
+                    BackgroundColor3 = GLASS, BackgroundTransparency = GLASS_T, LayoutOrder = nextOrder(),
                 }, page)
                 round(row, 6)
-                outline(row)
-                label(row, o.Name, UDim2.new(1, -134, 1, 0), UDim2.new(0, 12, 0, 0))
+                glassOutline(row)
+                local nameLbl = label(row, o.Name, UDim2.new(1, -134, 1, 0), UDim2.new(0, 12, 0, 0))
 
                 local box = new("TextBox", {
                     AnchorPoint = Vector2.new(1, 0.5),
@@ -479,6 +807,12 @@ do
                 end)
 
                 local self = {}
+                function self:SetName(t)
+                    nameLbl.Text = tostring(t)
+                end
+                function self:SetPlaceholder(t)
+                    box.PlaceholderText = tostring(t)
+                end
                 function self:Set(text)
                     box.Text = tostring(text)
                     safe(o.Callback, box.Text)
@@ -499,11 +833,11 @@ do
 
                 local holder = new("Frame", {
                     Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
-                    BackgroundColor3 = C.item, LayoutOrder = nextOrder(),
+                    BackgroundColor3 = GLASS, BackgroundTransparency = GLASS_T, LayoutOrder = nextOrder(),
                     ClipsDescendants = true,
                 }, page)
                 round(holder, 6)
-                outline(holder)
+                glassOutline(holder)
                 new("UIListLayout", {SortOrder = Enum.SortOrder.LayoutOrder}, holder)
 
                 local head = new("TextButton", {
@@ -511,7 +845,7 @@ do
                     BackgroundTransparency = 1, Text = "", AutoButtonColor = false,
                     LayoutOrder = 1,
                 }, holder)
-                label(head, o.Name, UDim2.new(1, -150, 1, 0), UDim2.new(0, 12, 0, 0))
+                local nameLbl = label(head, o.Name, UDim2.new(1, -150, 1, 0), UDim2.new(0, 12, 0, 0))
                 local valueLabel = new("TextLabel", {
                     AnchorPoint = Vector2.new(1, 0.5),
                     Position = UDim2.new(1, -28, 0.5, 0),
@@ -531,6 +865,7 @@ do
 
                 local list = new("ScrollingFrame", {
                     Size = UDim2.new(1, 0, 0, 0),
+                    Active = true,
                     BackgroundTransparency = 1, BorderSizePixel = 0,
                     ScrollBarThickness = 3, ScrollBarImageColor3 = Color3.fromRGB(90, 90, 90),
                     AutomaticCanvasSize = Enum.AutomaticSize.Y,
@@ -547,11 +882,32 @@ do
                 }, list)
 
                 local self = {}
+                function self:SetName(t)
+                    nameLbl.Text = tostring(t)
+                end
+                local targetH = 0
 
                 local function render()
                     valueLabel.Text = current or "未選擇"
-                    arrow.Text = open and "▴" or "▾"
-                    list.Visible = open
+                end
+
+                -- 展開 / 收合動畫
+                local function applyOpen(animate)
+                    tween(arrow, {Rotation = open and 180 or 0}, 0.22,
+                        Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+                    if open then
+                        list.Visible = true
+                        tween(list, {Size = UDim2.new(1, 0, 0, targetH)}, animate and 0.26 or 0.01,
+                            Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+                    else
+                        tween(list, {Size = UDim2.new(1, 0, 0, 0)}, 0.2,
+                            Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+                        task.delay(0.22, function()
+                            if not open then
+                                list.Visible = false
+                            end
+                        end)
+                    end
                 end
 
                 local function rebuild()
@@ -582,18 +938,21 @@ do
                             current = name
                             open = false
                             render()
+                            applyOpen(true)
                             rebuild()
                             safe(o.Callback, {name})
                         end)
                     end
                     -- 選項太多時限制高度、可捲動
-                    local h = math.min(math.max(#options, 1) * 32 + 10, 170)
-                    list.Size = UDim2.new(1, 0, 0, h)
+                    targetH = math.min(math.max(#options, 1) * 32 + 10, 170)
+                    if open then
+                        tween(list, {Size = UDim2.new(1, 0, 0, targetH)}, 0.2)
+                    end
                 end
 
                 head.Activated:Connect(function()
                     open = not open
-                    render()
+                    applyOpen(true)
                 end)
 
                 function self:Set(opt)
@@ -630,6 +989,11 @@ do
 
             return Tab
         end
+
+        -- 開場動畫
+        task.defer(function()
+            lib:SetVisibility(true)
+        end)
 
         return Window
     end
