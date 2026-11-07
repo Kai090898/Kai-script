@@ -257,46 +257,24 @@ do
             BackgroundColor3 = C.stroke, BorderSizePixel = 0,
         }, main)
 
-        -- 白色波浪：覆蓋整個視窗，從右下角往左上斜掃過去（不會擋住點擊）
-        local wave = new("Frame", {
-            Name = "Wave",
-            Size = UDim2.new(1, 0, 1, 0),
-            BackgroundColor3 = Color3.new(1, 1, 1),
-            BorderSizePixel = 0,
-            ZIndex = 100,
-            Active = false,
+        -- 會一直來回流動的白色光條
+        local glow = new("Frame", {
+            Size = UDim2.new(1, 0, 0, 2), Position = UDim2.new(0, 0, 0, 35),
+            BackgroundColor3 = C.text, BorderSizePixel = 0,
         }, main)
-        local waveGrad = new("UIGradient", {
-            Rotation = 45,
+        local glowGrad = new("UIGradient", {
             Transparency = NumberSequence.new({
                 NumberSequenceKeypoint.new(0, 1),
-                NumberSequenceKeypoint.new(0.30, 1),
-                NumberSequenceKeypoint.new(0.42, 0.93),
-                NumberSequenceKeypoint.new(0.50, 0.78),
-                NumberSequenceKeypoint.new(0.58, 0.93),
-                NumberSequenceKeypoint.new(0.70, 1),
+                NumberSequenceKeypoint.new(0.35, 1),
+                NumberSequenceKeypoint.new(0.5, 0),
+                NumberSequenceKeypoint.new(0.65, 1),
                 NumberSequenceKeypoint.new(1, 1),
             }),
-            Offset = Vector2.new(1, 0),
-        }, wave)
-
-        task.spawn(function()
-            while gui.Parent do
-                if shown then
-                    -- 一道波浪掃完（剛好離開畫面）就立刻接下一道，中間不停頓
-                    waveGrad.Offset = Vector2.new(0.75, 0)
-                    local tw = TweenService:Create(
-                        waveGrad,
-                        TweenInfo.new(1.6, Enum.EasingStyle.Linear),
-                        {Offset = Vector2.new(-0.75, 0)}
-                    )
-                    tw:Play()
-                    tw.Completed:Wait()
-                else
-                    task.wait(0.3)
-                end
-            end
-        end)
+            Offset = Vector2.new(-1, 0),
+        }, glow)
+        TweenService:Create(glowGrad,
+            TweenInfo.new(2.4, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
+            {Offset = Vector2.new(1, 0)}):Play()
 
         pressFx(minBtn, 0.85)
 
