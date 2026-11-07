@@ -580,6 +580,7 @@ do
                 Size = UDim2.new(1, 0, 0, 32),
                 BackgroundColor3 = C.item, BackgroundTransparency = 1,
                 Text = name, Font = FONT, TextSize = 13, TextColor3 = C.sub,
+                TextStrokeTransparency = 0.5,
                 AutoButtonColor = false, LayoutOrder = tabOrder,
             }, tabList)
             round(btn, 6)
@@ -632,6 +633,7 @@ do
                     Size = size, Position = pos or UDim2.new(0, 0, 0, 0),
                     BackgroundTransparency = 1, Text = text,
                     Font = FONT, TextSize = 13, TextColor3 = C.text,
+                    TextStrokeTransparency = 0.5,
                     TextXAlignment = align or Enum.TextXAlignment.Left,
                     TextWrapped = true,
                 }, parent)
@@ -643,6 +645,7 @@ do
                     Size = UDim2.new(1, 0, 0, 22),
                     BackgroundTransparency = 1, Text = string.upper(text),
                     Font = FONT_B, TextSize = 11, TextColor3 = C.sub,
+                    TextStrokeTransparency = 0.5,
                     TextXAlignment = Enum.TextXAlignment.Left,
                     LayoutOrder = nextOrder(),
                 }, page)
@@ -659,11 +662,11 @@ do
                     Size = UDim2.new(1, 0, 0, 38),
                     BackgroundColor3 = C.item, AutoButtonColor = false,
                     Text = o.Name, Font = FONT, TextSize = 13, TextColor3 = C.text,
+                    TextStrokeTransparency = 0.5,
                     LayoutOrder = nextOrder(),
                 }, page)
                 round(b, 6)
                 outline(b)
-                glassify(b, 0.25)
                 pressFx(b, 0.97)
                 b.MouseEnter:Connect(function() tween(b, {BackgroundColor3 = C.hover}) end)
                 b.MouseLeave:Connect(function() tween(b, {BackgroundColor3 = C.item}) end)
@@ -689,7 +692,6 @@ do
                 }, page)
                 round(row, 6)
                 outline(row)
-                glassify(row, 0.25)
                 pressFx(row, 0.98)
                 local nameLbl = label(row, o.Name, UDim2.new(1, -66, 1, 0), UDim2.new(0, 12, 0, 0))
 
@@ -749,7 +751,6 @@ do
                 }, page)
                 round(row, 6)
                 outline(row)
-                glassify(row, 0.25)
                 local nameLbl = label(row, o.Name, UDim2.new(1, -134, 1, 0), UDim2.new(0, 12, 0, 0))
 
                 local box = new("TextBox", {
@@ -802,7 +803,6 @@ do
                 }, page)
                 round(holder, 6)
                 outline(holder)
-                glassify(holder, 0.25)
                 new("UIListLayout", {SortOrder = Enum.SortOrder.LayoutOrder}, holder)
 
                 local head = new("TextButton", {
