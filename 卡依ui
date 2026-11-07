@@ -346,6 +346,16 @@ do
         end
         local bgImg = makeBg("BgGif")
         local bgImg2 = makeBg("BgGif2")
+        local bgDim = new("Frame", {
+            Name = "BgDim",
+            Size = UDim2.new(1, 0, 1, 0),
+            BackgroundColor3 = C.bg,
+            BackgroundTransparency = 1,
+            BorderSizePixel = 0,
+            ZIndex = 0,
+            Visible = false,
+            Active = false,
+        }, main)
         local bgLoaded, bgWanted = false, true
 
         -- 標題列
@@ -543,11 +553,17 @@ do
                     img.Image = asset
                     img.ImageRectSize = Vector2.new(o.FrameW, o.FrameH)
                 end
-                bgImg.ImageTransparency = baseT
+                -- 先把圖載入完再開始播，避免一開始卡頓
+                pcall(function()
+                    game:GetService("ContentProvider"):PreloadAsync({bgImg, bgImg2})
+                end)
+                bgImg.ImageTransparency = 0
                 bgImg2.ImageTransparency = 1
+                bgDim.BackgroundTransparency = 1 - baseT
                 bgLoaded = true
                 bgImg.Visible = bgWanted
                 bgImg2.Visible = bgWanted
+                bgDim.Visible = bgWanted
                 setGlass(bgWanted)
 
                 local frames, cols = o.Frames, o.Cols
@@ -570,7 +586,7 @@ do
                         bgImg.ImageRectOffset = rectOf(i)
                         bgImg2.ImageRectOffset = rectOf((i + 1) % frames)
                     end
-                    bgImg2.ImageTransparency = 1 - f * (1 - baseT)
+                    bgImg2.ImageTransparency = 1 - f
                 end))
             end)
         end
@@ -580,6 +596,7 @@ do
             if bgLoaded then
                 bgImg.Visible = bgWanted
                 bgImg2.Visible = bgWanted
+                bgDim.Visible = bgWanted
                 setGlass(bgWanted)
             end
         end
