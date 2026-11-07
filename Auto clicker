@@ -920,6 +920,9 @@ local EN = {
     ["傳送"] = "Teleport",
     ["位置點"] = "Waypoints",
     ["其他"] = "Misc",
+    ["掛機"] = "Farming",
+    ["自動撿花"] = "Auto Collect Petals",
+    ["撿花方式"] = "Collect Method",
     ["設定檔"] = "Config",
     ["介面與聲音"] = "UI & Sound",
     -- 主要
@@ -1555,6 +1558,91 @@ ModTab:CreateButton({
         end
     end,
 })
+
+-- 掛機
+ModTab:CreateSection("掛機")
+
+do
+    local petalOn = false
+    local petalMode = firetouchinterest and "模擬碰觸" or "傳送碰觸"
+    local cooldown = setmetatable({}, {__mode = "k"})  -- 同一朵花短時間內不重複處理
+
+    -- 回傳 true 代表這次有移動角色（之後要傳回原位）
+    local function collect(root, petal)
+        if petalMode == "模擬碰觸" and firetouchinterest then
+            pcall(function()
+                firetouchinterest(root, petal, 0)
+                task.wait()
+                firetouchinterest(root, petal, 1)
+            end)
+            return false
+        end
+        local ok = pcall(function()
+            root.CFrame = petal.CFrame
+            root.AssemblyLinearVelocity = Vector3.zero
+        end)
+        task.wait(0.06)
+        return ok
+    end
+
+    task.spawn(function()
+        while true do
+            if petalOn then
+                local folder = workspace:FindFirstChild("FlowerPetals")
+                local root = getRoot()
+                local hum = getHumanoid()
+                if folder and root and hum and hum.Health > 0 then
+                    local origin = root.CFrame
+                    local moved = false
+                    for _, p in ipairs(folder:GetDescendants()) do
+                        if not petalOn then
+                            break
+                        end
+                        if p:IsA("BasePart") and p.Name == "Petal" and p.Parent
+                            and tick() - (cooldown[p] or 0) > 1.5 then
+                            cooldown[p] = tick()
+                            if collect(root, p) then
+                                moved = true
+                            end
+                        end
+                    end
+                    -- 用傳送方式撿完後，回到原本的位置
+                    if moved and root.Parent then
+                        root.CFrame = origin
+                        root.AssemblyLinearVelocity = Vector3.zero
+                    end
+                end
+                task.wait(0.15)
+            else
+                task.wait(0.3)
+            end
+        end
+    end)
+
+    local tPetal = ModTab:CreateToggle({
+        Name = "自動撿花",
+        CurrentValue = false,
+        Callback = function(v)
+            petalOn = v
+        end,
+    })
+    regToggle("autoPetal", tPetal, function() return petalOn end)
+
+    local dPetal = ModTab:CreateDropdown({
+        Name = "撿花方式",
+        Options = {"模擬碰觸", "傳送碰觸"},
+        CurrentOption = {petalMode},
+        Callback = function(opt)
+            local m = type(opt) == "table" and opt[1] or opt
+            if m == "模擬碰觸" or m == "傳送碰觸" then
+                petalMode = m
+            end
+        end,
+    })
+    regDropdown("petalMode", dPetal, function() return petalMode end, function(v)
+        petalMode = v
+    end)
+end
 
 -- 其他
 ModTab:CreateSection("其他")
