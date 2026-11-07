@@ -13,9 +13,13 @@ do
         hover = Color3.fromRGB(30, 30, 30),
         stroke = Color3.fromRGB(42, 42, 42),
         text = Color3.fromRGB(255, 255, 255),
-        sub = Color3.fromRGB(140, 140, 140),
+        sub = Color3.fromRGB(190, 190, 196),
         off = Color3.fromRGB(55, 55, 55),
     }
+    -- 灰白色透明（玻璃質感）
+    local GLASS = Color3.fromRGB(225, 225, 232)
+    local GLASS_T = 0.82       -- 平常的透明度
+    local GLASS_HOVER_T = 0.68 -- 滑過去時
     local FONT = Enum.Font.GothamMedium
     local FONT_B = Enum.Font.GothamBold
 
@@ -37,6 +41,15 @@ do
     local function outline(o, col)
         new("UIStroke", {
             Color = col or C.stroke,
+            Thickness = 1,
+            ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+        }, o)
+    end
+
+    local function glassOutline(o)
+        new("UIStroke", {
+            Color = Color3.fromRGB(255, 255, 255),
+            Transparency = 0.75,
             Thickness = 1,
             ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
         }, o)
@@ -311,25 +324,30 @@ do
         outline(main, Color3.fromRGB(60, 60, 60))
         new("UIScale", {Name = "WinScale", Scale = 0.9}, main)
 
-        -- 動態背景（只在標題列下方，放在最底層）
-        local bgImg = new("ImageLabel", {
-            Name = "BgGif",
-            Position = UDim2.new(0, 0, 0, 37),
-            Size = UDim2.new(1, 0, 1, -37),
-            BackgroundTransparency = 1,
-            BorderSizePixel = 0,
-            ScaleType = Enum.ScaleType.Crop,
-            ImageTransparency = 0.7,
-            Visible = false,
-            ZIndex = 0,
-            Active = false,
-        }, main)
+        -- 動態背景（鋪滿整個視窗，放在最底層；兩層圖片互相淡入淡出，畫面更連貫）
+        local function makeBg(name)
+            return new("ImageLabel", {
+                Name = name,
+                Position = UDim2.new(0, 0, 0, 0),
+                Size = UDim2.new(1, 0, 1, 0),
+                BackgroundTransparency = 1,
+                BorderSizePixel = 0,
+                ScaleType = Enum.ScaleType.Crop,
+                ImageTransparency = 0,
+                Visible = false,
+                ZIndex = 0,
+                Active = false,
+            }, main)
+        end
+        local bgImg = makeBg("BgGif")
+        local bgImg2 = makeBg("BgGif2")
         local bgLoaded, bgWanted = false, true
 
         -- 標題列
         local titleBar = new("Frame", {
             Size = UDim2.new(1, 0, 0, 36),
-            BackgroundColor3 = C.panel,
+            BackgroundColor3 = GLASS,
+            BackgroundTransparency = GLASS_T,
             BorderSizePixel = 0,
         }, main)
         local titleLabel = new("TextLabel", {
@@ -515,25 +533,40 @@ do
                     return
                 end
 
-                bgImg.Image = asset
-                bgImg.ImageRectSize = Vector2.new(o.FrameW, o.FrameH)
-                bgImg.ImageTransparency = o.Transparency or 0.7
+                local baseT = o.Transparency or 0
+                for _, img in ipairs({bgImg, bgImg2}) do
+                    img.Image = asset
+                    img.ImageRectSize = Vector2.new(o.FrameW, o.FrameH)
+                end
+                bgImg.ImageTransparency = baseT
+                bgImg2.ImageTransparency = 1
                 bgLoaded = true
                 bgImg.Visible = bgWanted
+                bgImg2.Visible = bgWanted
                 setGlass(bgWanted)
 
                 local frames, cols = o.Frames, o.Cols
-                local delay = 1 / (o.FPS or 14)
-                local i = 0
-                while gui.Parent and not closed do
-                    if shown and bgWanted then
-                        bgImg.ImageRectOffset = Vector2.new((i % cols) * o.FrameW, math.floor(i / cols) * o.FrameH)
-                        i = (i + 1) % frames
-                        task.wait(delay)
-                    else
-                        task.wait(0.3)
-                    end
+                local fps = o.FPS or 14
+                local t0 = os.clock()
+                local lastI = -1
+                local function rectOf(n)
+                    return Vector2.new((n % cols) * o.FrameW, math.floor(n / cols) * o.FrameH)
                 end
+                -- 每一幀都計算目前在第幾張和第幾張之間，把下一張疊上去慢慢淡入
+                track(game:GetService("RunService").RenderStepped:Connect(function()
+                    if not (shown and bgWanted) then
+                        return
+                    end
+                    local pos = ((os.clock() - t0) * fps) % frames
+                    local i = math.floor(pos)
+                    local f = pos - i
+                    if i ~= lastI then
+                        lastI = i
+                        bgImg.ImageRectOffset = rectOf(i)
+                        bgImg2.ImageRectOffset = rectOf((i + 1) % frames)
+                    end
+                    bgImg2.ImageTransparency = 1 - f * (1 - baseT)
+                end))
             end)
         end
 
@@ -541,6 +574,7 @@ do
             bgWanted = v and true or false
             if bgLoaded then
                 bgImg.Visible = bgWanted
+                bgImg2.Visible = bgWanted
                 setGlass(bgWanted)
             end
         end
@@ -556,7 +590,7 @@ do
             for _, x in ipairs(tabs) do
                 local on = (x == t)
                 tween(x.btn, {
-                    BackgroundTransparency = on and 0 or 1,
+                    BackgroundTransparency = on and 0.7 or 1,
                     TextColor3 = on and C.text or C.sub,
                 }, 0.2)
                 tween(x.bar, {Size = UDim2.new(0, 3, 0, on and 16 or 0)}, 0.25,
@@ -578,7 +612,7 @@ do
             tabOrder += 1
             local btn = new("TextButton", {
                 Size = UDim2.new(1, 0, 0, 32),
-                BackgroundColor3 = C.item, BackgroundTransparency = 1,
+                BackgroundColor3 = GLASS, BackgroundTransparency = 1,
                 Text = name, Font = FONT, TextSize = 13, TextColor3 = C.sub,
                 TextStrokeTransparency = 0.5,
                 AutoButtonColor = false, LayoutOrder = tabOrder,
@@ -660,19 +694,20 @@ do
             function Tab:CreateButton(o)
                 local b = new("TextButton", {
                     Size = UDim2.new(1, 0, 0, 38),
-                    BackgroundColor3 = C.item, AutoButtonColor = false,
+                    BackgroundColor3 = GLASS, BackgroundTransparency = GLASS_T, AutoButtonColor = false,
                     Text = o.Name, Font = FONT, TextSize = 13, TextColor3 = C.text,
+                    TextStrokeTransparency = 0.5,
                     TextStrokeTransparency = 0.5,
                     LayoutOrder = nextOrder(),
                 }, page)
                 round(b, 6)
-                outline(b)
+                glassOutline(b)
                 pressFx(b, 0.97)
-                b.MouseEnter:Connect(function() tween(b, {BackgroundColor3 = C.hover}) end)
-                b.MouseLeave:Connect(function() tween(b, {BackgroundColor3 = C.item}) end)
+                b.MouseEnter:Connect(function() tween(b, {BackgroundTransparency = GLASS_HOVER_T}) end)
+                b.MouseLeave:Connect(function() tween(b, {BackgroundTransparency = GLASS_T}) end)
                 b.Activated:Connect(function()
-                    b.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
-                    tween(b, {BackgroundColor3 = C.item}, 0.25)
+                    b.BackgroundTransparency = 0.4
+                    tween(b, {BackgroundTransparency = GLASS_T}, 0.25)
                     safe(o.Callback)
                 end)
                 local self = {}
@@ -687,11 +722,11 @@ do
                 local state = o.CurrentValue and true or false
                 local row = new("TextButton", {
                     Size = UDim2.new(1, 0, 0, 40),
-                    BackgroundColor3 = C.item, AutoButtonColor = false,
+                    BackgroundColor3 = GLASS, BackgroundTransparency = GLASS_T, AutoButtonColor = false,
                     Text = "", LayoutOrder = nextOrder(),
                 }, page)
                 round(row, 6)
-                outline(row)
+                glassOutline(row)
                 pressFx(row, 0.98)
                 local nameLbl = label(row, o.Name, UDim2.new(1, -66, 1, 0), UDim2.new(0, 12, 0, 0))
 
@@ -723,8 +758,8 @@ do
                 end
                 render()
 
-                row.MouseEnter:Connect(function() tween(row, {BackgroundColor3 = C.hover}) end)
-                row.MouseLeave:Connect(function() tween(row, {BackgroundColor3 = C.item}) end)
+                row.MouseEnter:Connect(function() tween(row, {BackgroundTransparency = GLASS_HOVER_T}) end)
+                row.MouseLeave:Connect(function() tween(row, {BackgroundTransparency = GLASS_T}) end)
                 row.Activated:Connect(function()
                     state = not state
                     render()
@@ -747,10 +782,10 @@ do
             function Tab:CreateInput(o)
                 local row = new("Frame", {
                     Size = UDim2.new(1, 0, 0, 40),
-                    BackgroundColor3 = C.item, LayoutOrder = nextOrder(),
+                    BackgroundColor3 = GLASS, BackgroundTransparency = GLASS_T, LayoutOrder = nextOrder(),
                 }, page)
                 round(row, 6)
-                outline(row)
+                glassOutline(row)
                 local nameLbl = label(row, o.Name, UDim2.new(1, -134, 1, 0), UDim2.new(0, 12, 0, 0))
 
                 local box = new("TextBox", {
@@ -798,11 +833,11 @@ do
 
                 local holder = new("Frame", {
                     Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
-                    BackgroundColor3 = C.item, LayoutOrder = nextOrder(),
+                    BackgroundColor3 = GLASS, BackgroundTransparency = GLASS_T, LayoutOrder = nextOrder(),
                     ClipsDescendants = true,
                 }, page)
                 round(holder, 6)
-                outline(holder)
+                glassOutline(holder)
                 new("UIListLayout", {SortOrder = Enum.SortOrder.LayoutOrder}, holder)
 
                 local head = new("TextButton", {
