@@ -1583,6 +1583,58 @@ do
     local homePos = Vector3.new(652, 4, -598)        -- 掛機區的重生點
     local skipUntil = setmetatable({}, {__mode = "k"})  -- 撿不到的花先跳過一陣子
 
+    -- ===== 掛機區範圍（四個角量出來的座標）=====
+    local AREA = {minX = 587, maxX = 1001, minZ = -692, maxZ = -495}
+    local EDGE_PAD = 2        -- 角色離邊界至少保持的距離（格）
+
+    -- 位置是否在掛機區內（超出去的花不撿）
+    local function inArea(pos)
+        return pos.X >= AREA.minX + 1 and pos.X <= AREA.maxX - 1
+            and pos.Z >= AREA.minZ + 1 and pos.Z <= AREA.maxZ - 1
+    end
+
+    -- 四面牆（只在你自己的畫面裡存在，用來擋住不要掉出去）
+    local wallFolder = nil
+
+    local function clearWalls()
+        if wallFolder then
+            wallFolder:Destroy()
+            wallFolder = nil
+        end
+    end
+
+    local function buildWalls()
+        clearWalls()
+        wallFolder = Instance.new("Folder")
+        wallFolder.Name = "KaiWalls"
+        wallFolder.Parent = workspace
+
+        local T, H, Y = 4, 60, 20   -- 厚度、高度、中心高度
+        local cx, cz = (AREA.minX + AREA.maxX) / 2, (AREA.minZ + AREA.maxZ) / 2
+        local w, d = AREA.maxX - AREA.minX, AREA.maxZ - AREA.minZ
+
+        local function wall(size, pos)
+            local part = Instance.new("Part")
+            part.Anchored = true
+            part.CanCollide = true
+            part.CanTouch = false
+            part.CanQuery = false
+            part.CastShadow = false
+            part.Material = Enum.Material.SmoothPlastic
+            part.Color = Color3.fromRGB(180, 220, 255)
+            part.Transparency = 0.85
+            part.Size = size
+            part.Position = pos
+            part.Parent = wallFolder
+        end
+
+        -- 牆的內側剛好貼在區域邊界上
+        wall(Vector3.new(w + 2 * T, H, T), Vector3.new(cx, Y, AREA.minZ - T / 2))
+        wall(Vector3.new(w + 2 * T, H, T), Vector3.new(cx, Y, AREA.maxZ + T / 2))
+        wall(Vector3.new(T, H, d), Vector3.new(AREA.minX - T / 2, Y, cz))
+        wall(Vector3.new(T, H, d), Vector3.new(AREA.maxX + T / 2, Y, cz))
+    end
+
     -- ===== 避開傳送陣 =====
     local HAZARD_MARGIN = 3.5   -- 離傳送陣邊緣至少保持的距離
     local hazards = {}
@@ -1760,7 +1812,7 @@ do
             if p:IsA("BasePart") and p.Name == "Petal" and p.Parent
                 and (skipUntil[p] or 0) < tick() then
                 local land = landingPoint(p)
-                if not inHazard(land) then
+                if inArea(land) and not inHazard(land) then
                     local off = land - root.Position
                     local flat = Vector3.new(off.X, 0, off.Z).Magnitude
                     if flat <= petalRange and (not bestD or flat < bestD) then
@@ -1781,7 +1833,7 @@ do
             local land, h = landingPoint(petal)
 
             -- 落地點如果在傳送陣範圍內就放棄這朵
-            if inHazard(land) then
+            if inHazard(land) or not inArea(land) then
                 break
             end
 
@@ -1886,6 +1938,11 @@ do
         CurrentValue = false,
         Callback = function(v)
             petalOn = v
+            if v then
+                buildWalls()
+            else
+                clearWalls()
+            end
             -- 啟動時自動開穿透，讓角色能直接穿過物件走過去；關閉時只還原自己開的那次
             if v and not noclipOn then
                 autoNoclip = true
@@ -1897,6 +1954,39 @@ do
         end,
     })
     regToggle("autoPetal", tPetal, function() return petalOn end)
+
+    -- 穿透開著時角色會穿過牆，所以每幀再把角色限制在區域內（離區域太遠就不處理）
+    RunService.Heartbeat:Connect(function()
+        if not petalOn then
+            return
+        end
+        local root = getRoot()
+        if not root then
+            return
+        end
+        local p = root.Position
+        if p.X < AREA.minX - 25 or p.X > AREA.maxX + 25
+            or p.Z < AREA.minZ - 25 or p.Z > AREA.maxZ + 25 then
+            return
+        end
+        local cx = math.clamp(p.X, AREA.minX + EDGE_PAD, AREA.maxX - EDGE_PAD)
+        local cz = math.clamp(p.Z, AREA.minZ + EDGE_PAD, AREA.maxZ - EDGE_PAD)
+        if cx ~= p.X or cz ~= p.Z then
+            root.CFrame = root.CFrame + Vector3.new(cx - p.X, 0, cz - p.Z)
+            local v = root.AssemblyLinearVelocity
+            root.AssemblyLinearVelocity = Vector3.new(0, v.Y, 0)
+        end
+    end)
+
+    UI:OnClose(function()
+        petalOn = false
+        clearWalls()
+        if autoNoclip then
+            autoNoclip = false
+            noclipOn = false
+            restoreNoclip()
+        end
+    end)
 
     local iPetalRange = ModTab:CreateInput({
         Name = "撿花範圍（輸入數字）",
