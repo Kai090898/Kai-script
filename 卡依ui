@@ -295,7 +295,7 @@ do
             BackgroundColor3 = C.panel,
             BorderSizePixel = 0,
         }, main)
-        new("TextLabel", {
+        local titleLabel = new("TextLabel", {
             Size = UDim2.new(1, -100, 1, 0), Position = UDim2.new(0, 14, 0, 0),
             BackgroundTransparency = 1, Text = cfg.Name or "UI",
             Font = FONT_B, TextSize = 15, TextColor3 = C.text,
@@ -448,6 +448,9 @@ do
 
         -- ---------- 分頁 ----------
         local Window = {}
+        function Window:SetTitle(text)
+            titleLabel.Text = tostring(text)
+        end
         local tabs = {}
         local tabOrder = 0
 
@@ -521,6 +524,9 @@ do
             end
 
             local Tab = {}
+            function Tab:SetName(text)
+                btn.Text = tostring(text)
+            end
             local order = 0
             local function nextOrder()
                 order += 1
@@ -539,14 +545,18 @@ do
 
             -- 區塊標題
             function Tab:CreateSection(text)
-                new("TextLabel", {
+                local secLabel = new("TextLabel", {
                     Size = UDim2.new(1, 0, 0, 22),
                     BackgroundTransparency = 1, Text = string.upper(text),
                     Font = FONT_B, TextSize = 11, TextColor3 = C.sub,
                     TextXAlignment = Enum.TextXAlignment.Left,
                     LayoutOrder = nextOrder(),
                 }, page)
-                return {}
+                local sec = {}
+                function sec:SetName(t)
+                    secLabel.Text = string.upper(tostring(t))
+                end
+                return sec
             end
 
             -- 按鈕
@@ -567,7 +577,11 @@ do
                     tween(b, {BackgroundColor3 = C.item}, 0.25)
                     safe(o.Callback)
                 end)
-                return {}
+                local self = {}
+                function self:SetName(t)
+                    b.Text = tostring(t)
+                end
+                return self
             end
 
             -- 開關
@@ -581,7 +595,7 @@ do
                 round(row, 6)
                 outline(row)
                 pressFx(row, 0.98)
-                label(row, o.Name, UDim2.new(1, -66, 1, 0), UDim2.new(0, 12, 0, 0))
+                local nameLbl = label(row, o.Name, UDim2.new(1, -66, 1, 0), UDim2.new(0, 12, 0, 0))
 
                 local pill = new("Frame", {
                     AnchorPoint = Vector2.new(1, 0.5),
@@ -620,6 +634,9 @@ do
                 end)
 
                 local self = {}
+                function self:SetName(t)
+                    nameLbl.Text = tostring(t)
+                end
                 function self:Set(v)
                     state = v and true or false
                     render()
@@ -636,7 +653,7 @@ do
                 }, page)
                 round(row, 6)
                 outline(row)
-                label(row, o.Name, UDim2.new(1, -134, 1, 0), UDim2.new(0, 12, 0, 0))
+                local nameLbl = label(row, o.Name, UDim2.new(1, -134, 1, 0), UDim2.new(0, 12, 0, 0))
 
                 local box = new("TextBox", {
                     AnchorPoint = Vector2.new(1, 0.5),
@@ -657,6 +674,12 @@ do
                 end)
 
                 local self = {}
+                function self:SetName(t)
+                    nameLbl.Text = tostring(t)
+                end
+                function self:SetPlaceholder(t)
+                    box.PlaceholderText = tostring(t)
+                end
                 function self:Set(text)
                     box.Text = tostring(text)
                     safe(o.Callback, box.Text)
@@ -689,7 +712,7 @@ do
                     BackgroundTransparency = 1, Text = "", AutoButtonColor = false,
                     LayoutOrder = 1,
                 }, holder)
-                label(head, o.Name, UDim2.new(1, -150, 1, 0), UDim2.new(0, 12, 0, 0))
+                local nameLbl = label(head, o.Name, UDim2.new(1, -150, 1, 0), UDim2.new(0, 12, 0, 0))
                 local valueLabel = new("TextLabel", {
                     AnchorPoint = Vector2.new(1, 0.5),
                     Position = UDim2.new(1, -28, 0.5, 0),
@@ -725,6 +748,9 @@ do
                 }, list)
 
                 local self = {}
+                function self:SetName(t)
+                    nameLbl.Text = tostring(t)
+                end
                 local targetH = 0
 
                 local function render()
