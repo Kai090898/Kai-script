@@ -993,7 +993,7 @@ do
                     options = newList or {}
                     local found = false
                     for _, n in ipairs(options) do
-                        if n == current thend
+                        if n == current then
                             found = true
                             break
                         end
