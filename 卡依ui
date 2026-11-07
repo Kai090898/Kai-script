@@ -99,12 +99,33 @@ do
     local main, float, notifyHolder
     local shown = false
     local closed = false
+    local glassItems = {}
+    local glassOn = false
     local connections = {}
     local closeCallbacks = {}
 
     local function track(conn)
         table.insert(connections, conn)
         return conn
+    end
+
+    local function glassify(obj, t)
+        table.insert(glassItems, {o = obj, t = t})
+        if glassOn then
+            obj.BackgroundTransparency = t
+        end
+    end
+
+    local function setGlass(on)
+        glassOn = on
+        for i = #glassItems, 1, -1 do
+            local g = glassItems[i]
+            if g.o.Parent then
+                tween(g.o, {BackgroundTransparency = on and g.t or 0}, 0.3)
+            else
+                table.remove(glassItems, i)
+            end
+        end
     end
 
     function lib:OnClose(fn)
@@ -289,6 +310,21 @@ do
         outline(main, Color3.fromRGB(60, 60, 60))
         new("UIScale", {Name = "WinScale", Scale = 0.9}, main)
 
+        -- 動態背景（只在標題列下方，放在最底層）
+        local bgImg = new("ImageLabel", {
+            Name = "BgGif",
+            Position = UDim2.new(0, 0, 0, 37),
+            Size = UDim2.new(1, 0, 1, -37),
+            BackgroundTransparency = 1,
+            BorderSizePixel = 0,
+            ScaleType = Enum.ScaleType.Crop,
+            ImageTransparency = 0.7,
+            Visible = false,
+            ZIndex = 0,
+            Active = false,
+        }, main)
+        local bgLoaded, bgWanted = false, true
+
         -- 標題列
         local titleBar = new("Frame", {
             Size = UDim2.new(1, 0, 0, 36),
@@ -339,6 +375,7 @@ do
             AutomaticCanvasSize = Enum.AutomaticSize.Y,
             CanvasSize = UDim2.new(0, 0, 0, 0),
         }, body)
+        glassify(tabList, 1)
         new("UIListLayout", {Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder}, tabList)
         new("UIPadding", {
             PaddingTop = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8),
@@ -450,6 +487,60 @@ do
         local Window = {}
         function Window:SetTitle(text)
             titleLabel.Text = tostring(text)
+        end
+
+        -- 動態背景：o = {Url, Frames, Cols, FrameW, FrameH, FPS, Transparency, CacheName}
+        function Window:SetBackgroundGif(o)
+            task.spawn(function()
+                local getAsset = getcustomasset or getsynasset
+                if not (writefile and getAsset) then
+                    warn("[卡依腳本] 這個執行器不支援 writefile / getcustomasset，無法顯示動態背景")
+                    return
+                end
+                local name = o.CacheName or "KaiUI_bg.png"
+                local ok, asset = pcall(function()
+                    if not (isfile and isfile(name)) then
+                        local data = game:HttpGet(o.Url)
+                        if #data < 1000 or data:sub(2, 4) ~= "PNG" then
+                            error("下載的不是有效的 PNG")
+                        end
+                        writefile(name, data)
+                    end
+                    return getAsset(name)
+                end)
+                if not ok or not asset then
+                    warn("[卡依腳本] 動態背景載入失敗：" .. tostring(asset))
+                    return
+                end
+
+                bgImg.Image = asset
+                bgImg.ImageRectSize = Vector2.new(o.FrameW, o.FrameH)
+                bgImg.ImageTransparency = o.Transparency or 0.7
+                bgLoaded = true
+                bgImg.Visible = bgWanted
+                setGlass(bgWanted)
+
+                local frames, cols = o.Frames, o.Cols
+                local delay = 1 / (o.FPS or 14)
+                local i = 0
+                while gui.Parent and not closed do
+                    if shown and bgWanted then
+                        bgImg.ImageRectOffset = Vector2.new((i % cols) * o.FrameW, math.floor(i / cols) * o.FrameH)
+                        i = (i + 1) % frames
+                        task.wait(delay)
+                    else
+                        task.wait(0.3)
+                    end
+                end
+            end)
+        end
+
+        function Window:SetBackgroundEnabled(v)
+            bgWanted = v and true or false
+            if bgLoaded then
+                bgImg.Visible = bgWanted
+                setGlass(bgWanted)
+            end
         end
         local tabs = {}
         local tabOrder = 0
@@ -569,6 +660,7 @@ do
                 }, page)
                 round(b, 6)
                 outline(b)
+                glassify(b, 0.25)
                 pressFx(b, 0.97)
                 b.MouseEnter:Connect(function() tween(b, {BackgroundColor3 = C.hover}) end)
                 b.MouseLeave:Connect(function() tween(b, {BackgroundColor3 = C.item}) end)
@@ -594,6 +686,7 @@ do
                 }, page)
                 round(row, 6)
                 outline(row)
+                glassify(row, 0.25)
                 pressFx(row, 0.98)
                 local nameLbl = label(row, o.Name, UDim2.new(1, -66, 1, 0), UDim2.new(0, 12, 0, 0))
 
@@ -653,6 +746,7 @@ do
                 }, page)
                 round(row, 6)
                 outline(row)
+                glassify(row, 0.25)
                 local nameLbl = label(row, o.Name, UDim2.new(1, -134, 1, 0), UDim2.new(0, 12, 0, 0))
 
                 local box = new("TextBox", {
@@ -705,6 +799,7 @@ do
                 }, page)
                 round(holder, 6)
                 outline(holder)
+                glassify(holder, 0.25)
                 new("UIListLayout", {SortOrder = Enum.SortOrder.LayoutOrder}, holder)
 
                 local head = new("TextButton", {
