@@ -106,6 +106,7 @@ local boostOn = false
 local infJumpOn = false
 local flyOn, flyVal = false, 50
 local noclipOn = false
+local antiFlingOn = false
 local gravOn, gravVal = false, 50
 local clickTpOn = false
 local antiAfkOn = false
@@ -119,6 +120,7 @@ local orig = {}          -- 原始數值
 local filterOrig = {}    -- 濾鏡原本的開關狀態
 local boostOrig = {}     -- 特效原本的開關狀態
 local noclipParts = {}   -- 被穿牆修改過的零件
+local antiFlingParts = {} -- 被防撞飛修改過的零件
 local muteOrig = {}      -- 音效原本的音量
 local flyBV = nil
 local boostConn = nil
@@ -316,6 +318,29 @@ local function restoreNoclip()
         end
     end
     noclipParts = {}
+end
+
+-- ----- 防被撞飛（角色透明、別人碰不到） -----
+local ANTI_FLING_TRANSPARENCY = 0.6
+
+local function restoreAntiFling()
+    for p in pairs(antiFlingParts) do
+        if p.Parent then
+            -- 如果穿牆還開著，碰撞交給穿牆處理
+            if not noclipOn then
+                p.CanCollide = true
+            end
+        end
+    end
+    antiFlingParts = {}
+    local char = LocalPlayer.Character
+    if char then
+        for _, p in ipairs(char:GetDescendants()) do
+            if p:IsA("BasePart") then
+                p.LocalTransparencyModifier = 0
+            end
+        end
+    end
 end
 
 -- ----- 玩家透視（ESP）-----
@@ -546,16 +571,29 @@ RunService.RenderStepped:Connect(function()
     end
 end)
 
--- 穿牆
+-- 穿牆 / 防被撞飛
 RunService.Stepped:Connect(function()
-    if noclipOn then
-        local char = LocalPlayer.Character
-        if char then
-            for _, p in ipairs(char:GetDescendants()) do
-                if p:IsA("BasePart") and p.CanCollide then
+    if not (noclipOn or antiFlingOn) then
+        return
+    end
+    local char = LocalPlayer.Character
+    if not char then
+        return
+    end
+    for _, p in ipairs(char:GetDescendants()) do
+        if p:IsA("BasePart") then
+            if p.CanCollide then
+                if noclipOn then
                     noclipParts[p] = true
-                    p.CanCollide = false
                 end
+                if antiFlingOn then
+                    antiFlingParts[p] = true
+                end
+                p.CanCollide = false
+            end
+            -- 防被撞飛：角色半透明（只有自己看得到），讓你知道已開啟
+            if antiFlingOn and p.Name ~= "HumanoidRootPart" then
+                p.LocalTransparencyModifier = ANTI_FLING_TRANSPARENCY
             end
         end
     end
@@ -1061,6 +1099,18 @@ local tNoclip = ModTab:CreateToggle({
     end,
 })
 regToggle("noclip", tNoclip, function() return noclipOn end)
+
+local tAntiFling = ModTab:CreateToggle({
+    Name = "防被撞飛（角色透明、別人碰不到）",
+    CurrentValue = false,
+    Callback = function(v)
+        antiFlingOn = v
+        if not v then
+            restoreAntiFling()
+        end
+    end,
+})
+regToggle("antiFling", tAntiFling, function() return antiFlingOn end)
 
 local tGrav = ModTab:CreateToggle({
     Name = "啟用重力修改",
