@@ -1568,16 +1568,149 @@ do
     local petalRange = 120
     local skipUntil = setmetatable({}, {__mode = "k"})  -- 撿不到的花先跳過一陣子
 
+    -- ===== 避開傳送陣 =====
+    local HAZARD_MARGIN = 3.5   -- 離傳送陣邊緣至少保持的距離
+    local hazards = {}
+    local lastHazardScan = 0
+
+    local function scanHazards()
+        if tick() - lastHazardScan < 8 then
+            return
+        end
+        lastHazardScan = tick()
+        local list = {}
+        local scope = workspace:FindFirstChild("SakuraRestArea") or workspace
+        for _, v in ipairs(scope:GetDescendants()) do
+            if v:IsA("BasePart") and v.Name:lower():find("teleport") then
+                table.insert(list, v)
+            end
+        end
+        hazards = list
+    end
+
+    local function toLocal2(part, pos)
+        local p = part.CFrame:PointToObjectSpace(pos)
+        return Vector2.new(p.X, p.Z)
+    end
+
+    local function toWorld(part, v2, y)
+        local w = part.CFrame:PointToWorldSpace(Vector3.new(v2.X, 0, v2.Y))
+        return Vector3.new(w.X, y, w.Z)
+    end
+
+    -- 線段 a→b 是否穿過以原點為中心、半寬 hx、半長 hz 的矩形
+    local function segHits(a, b, hx, hz)
+        local d = b - a
+        local t0, t1 = 0, 1
+        local axes = {{a.X, d.X, hx}, {a.Y, d.Y, hz}}
+        for _, ax in ipairs(axes) do
+            local ao, dd, h = ax[1], ax[2], ax[3]
+            if math.abs(dd) < 1e-6 then
+                if ao < -h or ao > h then
+                    return false
+                end
+            else
+                local ta, tb = (-h - ao) / dd, (h - ao) / dd
+                if ta > tb then
+                    ta, tb = tb, ta
+                end
+                t0 = math.max(t0, ta)
+                t1 = math.min(t1, tb)
+                if t0 > t1 then
+                    return false
+                end
+            end
+        end
+        return true
+    end
+
+    local function hazardHalf(part)
+        return part.Size.X / 2 + HAZARD_MARGIN, part.Size.Z / 2 + HAZARD_MARGIN
+    end
+
+    -- 這個位置是否在傳送陣（含安全距離）範圍內
+    local function inHazard(pos)
+        for _, h in ipairs(hazards) do
+            if h.Parent then
+                local hx, hz = hazardHalf(h)
+                local a = toLocal2(h, pos)
+                if math.abs(a.X) < hx and math.abs(a.Y) < hz then
+                    return true
+                end
+            end
+        end
+        return false
+    end
+
+    -- 從 from 走到 to，如果會踩到傳送陣，回傳要先繞過去的中繼點；不用繞就回傳 nil
+    local function detour(from, to)
+        scanHazards()
+        for _, h in ipairs(hazards) do
+            if h.Parent then
+                local hx, hz = hazardHalf(h)
+                local a, b = toLocal2(h, from), toLocal2(h, to)
+                local y = from.Y
+
+                -- 已經站在危險範圍裡：先往最近的邊走出去
+                if math.abs(a.X) < hx and math.abs(a.Y) < hz then
+                    local dx, dz = hx - math.abs(a.X), hz - math.abs(a.Y)
+                    local out
+                    if dx < dz then
+                        out = Vector2.new((a.X >= 0 and 1 or -1) * (hx + 1), a.Y)
+                    else
+                        out = Vector2.new(a.X, (a.Y >= 0 and 1 or -1) * (hz + 1))
+                    end
+                    return toWorld(h, out, y)
+                end
+
+                local ehx, ehz = hx - 0.05, hz - 0.05
+                if segHits(a, b, ehx, ehz) then
+                    local c = {
+                        Vector2.new(-hx, -hz), Vector2.new(hx, -hz),
+                        Vector2.new(hx, hz), Vector2.new(-hx, hz),
+                    }
+                    local best, bestLen
+                    local function consider(first, pts)
+                        local prev, len = a, 0
+                        for _, q in ipairs(pts) do
+                            if segHits(prev, q, ehx, ehz) then
+                                return
+                            end
+                            len += (q - prev).Magnitude
+                            prev = q
+                        end
+                        if segHits(prev, b, ehx, ehz) then
+                            return
+                        end
+                        len += (b - prev).Magnitude
+                        if not bestLen or len < bestLen then
+                            best, bestLen = first, len
+                        end
+                    end
+                    for i = 1, 4 do
+                        consider(c[i], {c[i]})
+                        consider(c[i], {c[i], c[i % 4 + 1]})
+                    end
+                    if best then
+                        return toWorld(h, best, y)
+                    end
+                end
+            end
+        end
+        return nil
+    end
+
     -- 找範圍內最近的花（用水平距離，因為花可能還在半空中往下掉）
     local function nearestPetal(root)
         local folder = workspace:FindFirstChild("FlowerPetals")
         if not folder then
             return nil
         end
+        scanHazards()
         local best, bestD
         for _, p in ipairs(folder:GetDescendants()) do
             if p:IsA("BasePart") and p.Name == "Petal" and p.Parent
-                and (skipUntil[p] or 0) < tick() then
+                and (skipUntil[p] or 0) < tick() and not inHazard(p.Position) then
                 local off = p.Position - root.Position
                 local flat = Vector3.new(off.X, 0, off.Z).Magnitude
                 if flat <= petalRange and (not bestD or flat < bestD) then
@@ -1594,7 +1727,9 @@ do
         local lastPos, lastCheck = root.Position, tick()
         local reachedAt = nil
         while petalOn and petal.Parent and tick() - t0 < 7 and hum.Health > 0 do
-            hum:MoveTo(petal.Position)
+            -- 如果直線會踩到傳送陣，先走到繞路的中繼點
+            local wp = detour(root.Position, petal.Position)
+            hum:MoveTo(wp or petal.Position)
 
             local off = petal.Position - root.Position
             local flat = Vector3.new(off.X, 0, off.Z).Magnitude
