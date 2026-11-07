@@ -788,16 +788,24 @@ local Window = UI:CreateWindow({
 })
 
 -- 動態背景（圖片：3 欄 4 列，共 12 幀，單張 340x192）
-Window:SetBackgroundGif({
-    Url = "https://raw.githubusercontent.com/Kai090898/Kai-slap-battles-script/refs/heads/main/kai_bg.png",
-    Frames = 12,
-    Cols = 3,
-    FrameW = 340,
-    FrameH = 192,
-    FPS = 12,
-    Transparency = 0,
-    CacheName = "KaiUI_bg.png",
-})
+if type(Window.SetBackgroundGif) ~= "function" then
+    warn("[卡依腳本] GitHub 上的「卡依ui」還是舊版，沒有 SetBackgroundGif，請更新它")
+    pcall(function() UI:Notify({Title = "背景失敗", Content = "GitHub 的「卡依ui」是舊版，請更新", Duration = 6}) end)
+elseif not (writefile and (getcustomasset or getsynasset)) then
+    warn("[卡依腳本] 這個執行器不支援 writefile / getcustomasset")
+    pcall(function() UI:Notify({Title = "背景失敗", Content = "執行器不支援 writefile / getcustomasset", Duration = 6}) end)
+else
+    Window:SetBackgroundGif({
+        Url = "https://raw.githubusercontent.com/Kai090898/Kai-slap-battles-script/refs/heads/main/kai_bg.png",
+        Frames = 12,
+        Cols = 3,
+        FrameW = 340,
+        FrameH = 192,
+        FPS = 12,
+        Transparency = 0,
+        CacheName = "KaiUI_bg_v2.png",
+    })
+end
 
 -- ---------- 主要 ----------
 local Tab = Window:CreateTab("主要")
