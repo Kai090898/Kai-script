@@ -921,8 +921,9 @@ local EN = {
     ["位置點"] = "Waypoints",
     ["其他"] = "Misc",
     ["掛機"] = "Farming",
-    ["自動撿花"] = "Auto Collect Petals",
-    ["撿花方式"] = "Collect Method",
+    ["自動撿花（走過去）"] = "Auto Collect Petals (walks)",
+    ["撿花範圍（輸入數字）"] = "Collect Range (number)",
+    ["預設 120，只追這個距離內的花"] = "Default 120, only chases petals within this distance",
     ["設定檔"] = "Config",
     ["介面與聲音"] = "UI & Sound",
     -- 主要
@@ -1564,63 +1565,96 @@ ModTab:CreateSection("掛機")
 
 do
     local petalOn = false
-    local petalMode = firetouchinterest and "模擬碰觸" or "傳送碰觸"
-    local cooldown = setmetatable({}, {__mode = "k"})  -- 同一朵花短時間內不重複處理
+    local petalRange = 120
+    local skipUntil = setmetatable({}, {__mode = "k"})  -- 撿不到的花先跳過一陣子
 
-    -- 回傳 true 代表這次有移動角色（之後要傳回原位）
-    local function collect(root, petal)
-        if petalMode == "模擬碰觸" and firetouchinterest then
-            pcall(function()
-                firetouchinterest(root, petal, 0)
-                task.wait()
-                firetouchinterest(root, petal, 1)
-            end)
-            return false
+    -- 找範圍內最近的花（用水平距離，因為花可能還在半空中往下掉）
+    local function nearestPetal(root)
+        local folder = workspace:FindFirstChild("FlowerPetals")
+        if not folder then
+            return nil
         end
-        local ok = pcall(function()
-            root.CFrame = petal.CFrame
-            root.AssemblyLinearVelocity = Vector3.zero
-        end)
-        task.wait(0.06)
-        return ok
+        local best, bestD
+        for _, p in ipairs(folder:GetDescendants()) do
+            if p:IsA("BasePart") and p.Name == "Petal" and p.Parent
+                and (skipUntil[p] or 0) < tick() then
+                local off = p.Position - root.Position
+                local flat = Vector3.new(off.X, 0, off.Z).Magnitude
+                if flat <= petalRange and (not bestD or flat < bestD) then
+                    best, bestD = p, flat
+                end
+            end
+        end
+        return best
+    end
+
+    -- 走到花那裡：一直更新目標位置，卡住就跳
+    local function walkTo(hum, root, petal)
+        local t0 = tick()
+        local lastPos, lastCheck = root.Position, tick()
+        local reachedAt = nil
+        while petalOn and petal.Parent and tick() - t0 < 7 and hum.Health > 0 do
+            hum:MoveTo(petal.Position)
+
+            local off = petal.Position - root.Position
+            local flat = Vector3.new(off.X, 0, off.Z).Magnitude
+            if flat < 2.5 then
+                reachedAt = reachedAt or tick()
+                -- 站在花下面超過 1.5 秒還沒撿到，就放棄這朵
+                if tick() - reachedAt > 1.5 then
+                    break
+                end
+            else
+                reachedAt = nil
+            end
+
+            -- 卡住偵測：0.7 秒幾乎沒移動就跳一下
+            if tick() - lastCheck > 0.7 then
+                if (root.Position - lastPos).Magnitude < 1 and flat > 3 then
+                    hum.Jump = true
+                end
+                lastPos, lastCheck = root.Position, tick()
+            end
+            task.wait(0.1)
+        end
+        if petal.Parent then
+            skipUntil[petal] = tick() + 5  -- 沒撿掉的花，5 秒內不再追
+        end
     end
 
     task.spawn(function()
+        local wasOn = false
         while true do
             if petalOn then
-                local folder = workspace:FindFirstChild("FlowerPetals")
+                wasOn = true
                 local root = getRoot()
                 local hum = getHumanoid()
-                if folder and root and hum and hum.Health > 0 then
-                    local origin = root.CFrame
-                    local moved = false
-                    for _, p in ipairs(folder:GetDescendants()) do
-                        if not petalOn then
-                            break
-                        end
-                        if p:IsA("BasePart") and p.Name == "Petal" and p.Parent
-                            and tick() - (cooldown[p] or 0) > 1.5 then
-                            cooldown[p] = tick()
-                            if collect(root, p) then
-                                moved = true
-                            end
-                        end
+                if root and hum and hum.Health > 0 and not hum.Sit then
+                    local petal = nearestPetal(root)
+                    if petal then
+                        pcall(walkTo, hum, root, petal)
+                    else
+                        task.wait(0.3)
                     end
-                    -- 用傳送方式撿完後，回到原本的位置
-                    if moved and root.Parent then
-                        root.CFrame = origin
-                        root.AssemblyLinearVelocity = Vector3.zero
+                else
+                    task.wait(0.5)
+                end
+                task.wait()
+            else
+                if wasOn then
+                    wasOn = false
+                    local root, hum = getRoot(), getHumanoid()
+                    if root and hum then
+                        hum:MoveTo(root.Position)  -- 停下來
                     end
                 end
-                task.wait(0.15)
-            else
                 task.wait(0.3)
             end
         end
     end)
 
     local tPetal = ModTab:CreateToggle({
-        Name = "自動撿花",
+        Name = "自動撿花（走過去）",
         CurrentValue = false,
         Callback = function(v)
             petalOn = v
@@ -1628,19 +1662,21 @@ do
     })
     regToggle("autoPetal", tPetal, function() return petalOn end)
 
-    local dPetal = ModTab:CreateDropdown({
-        Name = "撿花方式",
-        Options = {"模擬碰觸", "傳送碰觸"},
-        CurrentOption = {petalMode},
-        Callback = function(opt)
-            local m = type(opt) == "table" and opt[1] or opt
-            if m == "模擬碰觸" or m == "傳送碰觸" then
-                petalMode = m
+    local iPetalRange = ModTab:CreateInput({
+        Name = "撿花範圍（輸入數字）",
+        PlaceholderText = "預設 120，只追這個距離內的花",
+        Callback = function(text)
+            local n = tonumber(text)
+            if n and n > 0 then
+                petalRange = n
+                notify("已設定", "撿花範圍 = " .. n)
+            else
+                notify("輸入錯誤", "請輸入大於 0 的數字")
             end
         end,
     })
-    regDropdown("petalMode", dPetal, function() return petalMode end, function(v)
-        petalMode = v
+    regNumber("petalRange", iPetalRange, function() return petalRange end, function(v)
+        petalRange = v
     end)
 end
 
