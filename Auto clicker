@@ -1700,7 +1700,40 @@ do
         return nil
     end
 
-    -- 找範圍內最近的花（用水平距離，因為花可能還在半空中往下掉）
+    -- 預測花最後會落在哪裡：往正下方打射線找地面，
+    -- 如果花是會受重力往下掉的，再把水平的飄移一起算進去
+    local landParams = RaycastParams.new()
+    landParams.FilterType = Enum.RaycastFilterType.Exclude
+
+    local function landingPoint(petal)
+        local pos = petal.Position
+        local ignore = {}
+        if LocalPlayer.Character then
+            table.insert(ignore, LocalPlayer.Character)
+        end
+        local folder = workspace:FindFirstChild("FlowerPetals")
+        if folder then
+            table.insert(ignore, folder)
+        end
+        landParams.FilterDescendantsInstances = ignore
+
+        local hit = workspace:Raycast(pos, Vector3.new(0, -1000, 0), landParams)
+        local groundY = hit and hit.Position.Y or pos.Y
+        local h = math.max(pos.Y - groundY, 0)
+        local x, z = pos.X, pos.Z
+
+        if not petal.Anchored and h > 1 then
+            local v = petal.AssemblyLinearVelocity
+            local g = workspace.Gravity
+            local t = (v.Y + math.sqrt(v.Y * v.Y + 2 * g * h)) / g
+            t = math.clamp(t, 0, 6)
+            x += v.X * t
+            z += v.Z * t
+        end
+        return Vector3.new(x, groundY, z), h
+    end
+
+    -- 找範圍內最近的花（用預測的落地點算距離）
     local function nearestPetal(root)
         local folder = workspace:FindFirstChild("FlowerPetals")
         if not folder then
@@ -1710,32 +1743,42 @@ do
         local best, bestD
         for _, p in ipairs(folder:GetDescendants()) do
             if p:IsA("BasePart") and p.Name == "Petal" and p.Parent
-                and (skipUntil[p] or 0) < tick() and not inHazard(p.Position) then
-                local off = p.Position - root.Position
-                local flat = Vector3.new(off.X, 0, off.Z).Magnitude
-                if flat <= petalRange and (not bestD or flat < bestD) then
-                    best, bestD = p, flat
+                and (skipUntil[p] or 0) < tick() then
+                local land = landingPoint(p)
+                if not inHazard(land) then
+                    local off = land - root.Position
+                    local flat = Vector3.new(off.X, 0, off.Z).Magnitude
+                    if flat <= petalRange and (not bestD or flat < bestD) then
+                        best, bestD = p, flat
+                    end
                 end
             end
         end
         return best
     end
 
-    -- 走到花那裡：一直更新目標位置，卡住就跳
+    -- 走到花的落地點等它：一直更新預測位置，卡住就跳
     local function walkTo(hum, root, petal)
         local t0 = tick()
         local lastPos, lastCheck = root.Position, tick()
         local reachedAt = nil
-        while petalOn and petal.Parent and tick() - t0 < 7 and hum.Health > 0 do
-            -- 如果直線會踩到傳送陣，先走到繞路的中繼點
-            local wp = detour(root.Position, petal.Position)
-            hum:MoveTo(wp or petal.Position)
+        while petalOn and petal.Parent and tick() - t0 < 12 and hum.Health > 0 do
+            local land, h = landingPoint(petal)
 
-            local off = petal.Position - root.Position
+            -- 落地點如果在傳送陣範圍內就放棄這朵
+            if inHazard(land) then
+                break
+            end
+
+            -- 如果直線會踩到傳送陣，先走到繞路的中繼點
+            local wp = detour(root.Position, land)
+            hum:MoveTo(wp or land)
+
+            local off = land - root.Position
             local flat = Vector3.new(off.X, 0, off.Z).Magnitude
-            if flat < 2.5 then
+            if flat < 2.5 and h < 4 then
+                -- 花已經快落地了，站在那裡超過 1.5 秒還沒撿到，就放棄這朵
                 reachedAt = reachedAt or tick()
-                -- 站在花下面超過 1.5 秒還沒撿到，就放棄這朵
                 if tick() - reachedAt > 1.5 then
                     break
                 end
@@ -1743,7 +1786,7 @@ do
                 reachedAt = nil
             end
 
-            -- 卡住偵測：0.7 秒幾乎沒移動就跳一下
+            -- 卡住偵測：0.7 秒幾乎沒移動就跳一下（站著等花落下時不算）
             if tick() - lastCheck > 0.7 then
                 if (root.Position - lastPos).Magnitude < 1 and flat > 3 then
                     hum.Jump = true
@@ -1813,6 +1856,7 @@ do
     regNumber("petalRange", iPetalRange, function() return petalRange end, function(v)
         petalRange = v
     end)
+
 end
 
 -- 其他
