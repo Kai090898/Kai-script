@@ -305,6 +305,7 @@ do
             BackgroundColor3 = C.bg,
             BorderSizePixel = 0,
             GroupTransparency = 1,
+            Active = true,
         }, gui)
         round(main, 10)
         outline(main, Color3.fromRGB(60, 60, 60))
@@ -370,6 +371,7 @@ do
 
         local tabList = new("ScrollingFrame", {
             Size = UDim2.new(0, 104, 1, 0),
+            Active = true,
             BackgroundColor3 = C.bg, BorderSizePixel = 0,
             ScrollBarThickness = 0,
             AutomaticCanvasSize = Enum.AutomaticSize.Y,
@@ -593,6 +595,7 @@ do
 
             local page = new("ScrollingFrame", {
                 Size = UDim2.new(1, 0, 1, 0),
+                Active = true,
                 BackgroundTransparency = 1, BorderSizePixel = 0,
                 ScrollBarThickness = 3, ScrollBarImageColor3 = Color3.fromRGB(90, 90, 90),
                 AutomaticCanvasSize = Enum.AutomaticSize.Y,
@@ -827,6 +830,7 @@ do
 
                 local list = new("ScrollingFrame", {
                     Size = UDim2.new(1, 0, 0, 0),
+                    Active = true,
                     BackgroundTransparency = 1, BorderSizePixel = 0,
                     ScrollBarThickness = 3, ScrollBarImageColor3 = Color3.fromRGB(90, 90, 90),
                     AutomaticCanvasSize = Enum.AutomaticSize.Y,
