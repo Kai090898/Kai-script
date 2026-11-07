@@ -134,6 +134,41 @@ do
         end
     end
 
+    -- 兩種外觀：沒有動態背景 = 純黑底＋白字；有動態背景 = 玻璃質感＋黑字
+    local themeFns = {}
+    local DARK_TEXT = Color3.fromRGB(240, 240, 244)
+    local DARK_SUB = Color3.fromRGB(160, 160, 168)
+    local function txtCol() return glassOn and C.text or DARK_TEXT end
+    local function subCol() return glassOn and C.sub or DARK_SUB end
+
+    local function themed(obj, fn)
+        table.insert(themeFns, {o = obj, fn = fn})
+        fn()
+    end
+    local function themeText(obj, isSub)
+        themed(obj, function()
+            obj.TextColor3 = isSub and subCol() or txtCol()
+        end)
+    end
+    local function themeItem(obj, darkCol)
+        themed(obj, function()
+            if glassOn then
+                obj.BackgroundColor3 = GLASS
+                obj.BackgroundTransparency = GLASS_T
+            else
+                obj.BackgroundColor3 = darkCol or C.item
+                obj.BackgroundTransparency = 0
+            end
+        end)
+    end
+    local function hoverItem(obj, on, t, darkCol)
+        if glassOn then
+            tween(obj, {BackgroundTransparency = on and GLASS_HOVER_T or GLASS_T}, t)
+        else
+            tween(obj, {BackgroundColor3 = on and C.hover or (darkCol or C.item)}, t)
+        end
+    end
+
     local function setGlass(on)
         glassOn = on
         for i = #glassItems, 1, -1 do
@@ -142,6 +177,14 @@ do
                 tween(g.o, {BackgroundTransparency = on and g.t or 0}, 0.3)
             else
                 table.remove(glassItems, i)
+            end
+        end
+        for i = #themeFns, 1, -1 do
+            local e = themeFns[i]
+            if e.o.Parent then
+                pcall(e.fn)
+            else
+                table.remove(themeFns, i)
             end
         end
     end
@@ -167,7 +210,7 @@ do
             Size = UDim2.new(1, 0, 0, 0),
             Position = UDim2.new(0, 0, 0, -26),
             AutomaticSize = Enum.AutomaticSize.Y,
-            BackgroundColor3 = C.light,
+            BackgroundColor3 = glassOn and C.light or Color3.fromRGB(22, 22, 22),
             BorderSizePixel = 0,
             GroupTransparency = 1,
         }, slot)
@@ -181,18 +224,18 @@ do
         new("TextLabel", {
             Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
             BackgroundTransparency = 1, Text = tostring(o.Title or ""),
-            Font = FONT_B, TextSize = 14, TextColor3 = C.text,
+            Font = FONT_B, TextSize = 14, TextColor3 = txtCol(),
             TextXAlignment = Enum.TextXAlignment.Left, TextWrapped = true, LayoutOrder = 1,
         }, card)
         new("TextLabel", {
             Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
             BackgroundTransparency = 1, Text = tostring(o.Content or ""),
-            Font = FONT, TextSize = 12, TextColor3 = C.sub,
+            Font = FONT, TextSize = 12, TextColor3 = subCol(),
             TextXAlignment = Enum.TextXAlignment.Left, TextWrapped = true, LayoutOrder = 2,
         }, card)
         local bar = new("Frame", {
             Size = UDim2.new(1, 0, 0, 2),
-            BackgroundColor3 = C.bg, BorderSizePixel = 0, LayoutOrder = 3,
+            BackgroundColor3 = glassOn and C.bg or C.white, BorderSizePixel = 0, LayoutOrder = 3,
         }, card)
 
         -- 進場
@@ -386,7 +429,7 @@ do
             tween(closeBtn, {TextColor3 = Color3.fromRGB(255, 90, 90)}, 0.15)
         end)
         closeBtn.MouseLeave:Connect(function()
-            tween(closeBtn, {TextColor3 = C.sub}, 0.15)
+            tween(closeBtn, {TextColor3 = subCol()}, 0.15)
         end)
         new("Frame", {
             Size = UDim2.new(1, 0, 0, 1), Position = UDim2.new(0, 0, 0, 36),
@@ -395,6 +438,10 @@ do
 
         pressFx(minBtn, 0.85)
         pressFx(closeBtn, 0.85)
+        themeItem(titleBar, C.panel)
+        themeText(titleLabel)
+        themeText(minBtn, true)
+        themeText(closeBtn, true)
 
         -- 內容區
         local body = new("Frame", {
@@ -453,6 +500,10 @@ do
         round(float, 22)
         outline(float, Color3.fromRGB(90, 90, 90))
         pressFx(float, 0.88)
+        themed(float, function()
+            float.BackgroundColor3 = glassOn and C.light or C.item
+            float.TextColor3 = txtCol()
+        end)
 
         minBtn.Activated:Connect(function()
             lib:SetVisibility(false)
@@ -557,6 +608,20 @@ do
                 pcall(function()
                     game:GetService("ContentProvider"):PreloadAsync({bgImg, bgImg2})
                 end)
+                -- 圖真的載入成功才換成玻璃外觀；載入不了就維持純黑
+                local t1 = os.clock()
+                while os.clock() - t1 < 8 do
+                    local okL, loaded = pcall(function() return bgImg.IsLoaded end)
+                    if not okL or loaded then
+                        break
+                    end
+                    task.wait(0.1)
+                end
+                local okL, loaded = pcall(function() return bgImg.IsLoaded end)
+                if okL and not loaded then
+                    warn("[卡依腳本] 動態背景圖片載入逾時，維持純黑介面")
+                    return
+                end
                 bgImg.ImageTransparency = 0
                 bgImg2.ImageTransparency = 1
                 bgDim.BackgroundTransparency = 1 - baseT
@@ -603,6 +668,22 @@ do
         local tabs = {}
         local tabOrder = 0
 
+        local function paintTab(x, animate)
+            local props
+            if glassOn then
+                props = {BackgroundColor3 = GLASS, BackgroundTransparency = x.sel and 0.6 or GLASS_T}
+            else
+                props = {BackgroundColor3 = x.sel and Color3.fromRGB(48, 48, 48) or C.item, BackgroundTransparency = 0}
+            end
+            if animate then
+                tween(x.btn, props, 0.2)
+            else
+                for k, v in pairs(props) do
+                    x.btn[k] = v
+                end
+            end
+        end
+
         local current
         local function selectTab(t, animate)
             if current == t then
@@ -611,9 +692,8 @@ do
             current = t
             for _, x in ipairs(tabs) do
                 local on = (x == t)
-                tween(x.btn, {
-                    BackgroundTransparency = on and 0.6 or GLASS_T,
-                }, 0.2)
+                x.sel = on
+                paintTab(x, true)
                 -- 使用中的項目：方框下面出現白色橫線
                 tween(x.bar, {Size = UDim2.new(on and 0.6 or 0, 0, 0, 2)}, 0.25,
                     Enum.EasingStyle.Back, Enum.EasingDirection.Out)
@@ -669,6 +749,8 @@ do
 
             local tab = {btn = btn, page = page, bar = bar}
             table.insert(tabs, tab)
+            themed(btn, function() paintTab(tab, false) end)
+            themeText(btn)
             btn.Activated:Connect(function()
                 selectTab(tab, true)
             end)
@@ -687,7 +769,7 @@ do
             end
 
             local function label(parent, text, size, pos, align)
-                return new("TextLabel", {
+                local l = new("TextLabel", {
                     Size = size, Position = pos or UDim2.new(0, 0, 0, 0),
                     BackgroundTransparency = 1, Text = text,
                     Font = FONT, TextSize = 13, TextColor3 = C.text,
@@ -695,6 +777,8 @@ do
                     TextXAlignment = align or Enum.TextXAlignment.Left,
                     TextWrapped = true,
                 }, parent)
+                themeText(l)
+                return l
             end
 
             -- 區塊標題
@@ -707,6 +791,7 @@ do
                     TextXAlignment = Enum.TextXAlignment.Left,
                     LayoutOrder = nextOrder(),
                 }, page)
+                themeText(secLabel, true)
                 local sec = {}
                 function sec:SetName(t)
                     secLabel.Text = string.upper(tostring(t))
@@ -726,11 +811,17 @@ do
                 round(b, 6)
                 glassOutline(b)
                 pressFx(b, 0.97)
-                b.MouseEnter:Connect(function() tween(b, {BackgroundTransparency = GLASS_HOVER_T}) end)
-                b.MouseLeave:Connect(function() tween(b, {BackgroundTransparency = GLASS_T}) end)
+                themeItem(b)
+                themeText(b)
+                b.MouseEnter:Connect(function() hoverItem(b, true) end)
+                b.MouseLeave:Connect(function() hoverItem(b, false) end)
                 b.Activated:Connect(function()
-                    b.BackgroundTransparency = 0.4
-                    tween(b, {BackgroundTransparency = GLASS_T}, 0.25)
+                    if glassOn then
+                        b.BackgroundTransparency = 0.4
+                    else
+                        b.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+                    end
+                    hoverItem(b, false, 0.25)
                     safe(o.Callback)
                 end)
                 local self = {}
@@ -751,6 +842,7 @@ do
                 round(row, 6)
                 glassOutline(row)
                 pressFx(row, 0.98)
+                themeItem(row)
                 local nameLbl = label(row, o.Name, UDim2.new(1, -66, 1, 0), UDim2.new(0, 12, 0, 0))
 
                 local pill = new("Frame", {
@@ -781,8 +873,8 @@ do
                 end
                 render()
 
-                row.MouseEnter:Connect(function() tween(row, {BackgroundTransparency = GLASS_HOVER_T}) end)
-                row.MouseLeave:Connect(function() tween(row, {BackgroundTransparency = GLASS_T}) end)
+                row.MouseEnter:Connect(function() hoverItem(row, true) end)
+                row.MouseLeave:Connect(function() hoverItem(row, false) end)
                 row.Activated:Connect(function()
                     state = not state
                     render()
@@ -809,6 +901,7 @@ do
                 }, page)
                 round(row, 6)
                 glassOutline(row)
+                themeItem(row)
                 local nameLbl = label(row, o.Name, UDim2.new(1, -134, 1, 0), UDim2.new(0, 12, 0, 0))
 
                 local box = new("TextBox", {
@@ -823,6 +916,11 @@ do
                 }, row)
                 round(box, 5)
                 outline(box)
+                themed(box, function()
+                    box.BackgroundColor3 = glassOn and C.light or C.hover
+                    box.TextColor3 = txtCol()
+                    box.PlaceholderColor3 = glassOn and Color3.fromRGB(110, 110, 110) or Color3.fromRGB(120, 120, 128)
+                end)
 
                 -- 輸入完（按 Enter 或點到別處）就套用
                 box.FocusLost:Connect(function()
@@ -861,6 +959,7 @@ do
                 }, page)
                 round(holder, 6)
                 glassOutline(holder)
+                themeItem(holder)
                 new("UIListLayout", {SortOrder = Enum.SortOrder.LayoutOrder}, holder)
 
                 local head = new("TextButton", {
@@ -885,6 +984,8 @@ do
                     BackgroundTransparency = 1, Text = "▾",
                     Font = FONT_B, TextSize = 14, TextColor3 = C.sub,
                 }, head)
+                themeText(valueLabel, true)
+                themeText(arrow, true)
 
                 local list = new("ScrollingFrame", {
                     Size = UDim2.new(1, 0, 0, 0),
@@ -940,12 +1041,16 @@ do
                         end
                     end
                     if #options == 0 then
-                        new("TextButton", {
+                        local nb = new("TextButton", {
                             Size = UDim2.new(1, 0, 0, 28),
                             BackgroundColor3 = C.light, AutoButtonColor = false,
                             Text = "（沒有選項）", Font = FONT, TextSize = 12, TextColor3 = C.sub,
                             LayoutOrder = 1,
                         }, list)
+                        themed(nb, function()
+                            nb.BackgroundColor3 = glassOn and C.light or C.hover
+                            nb.TextColor3 = subCol()
+                        end)
                     end
                     for i, name in ipairs(options) do
                         local b = new("TextButton", {
@@ -957,6 +1062,10 @@ do
                         }, list)
                         round(b, 5)
                         outline(b)
+                        themed(b, function()
+                            b.BackgroundColor3 = glassOn and C.light or C.hover
+                            b.TextColor3 = txtCol()
+                        end)
                         b.Activated:Connect(function()
                             current = name
                             open = false
