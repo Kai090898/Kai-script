@@ -1,5 +1,12 @@
-local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+-- ====================================================================
+--  卡依腳本（主程式）
+--  介面庫從 GitHub 載入（檔名：卡依ui）
+-- ====================================================================
+local UI = loadstring(game:HttpGet("https://raw.githubusercontent.com/Kai090898/Kai-slap-battles-script/refs/heads/main/%E5%8D%A1%E4%BE%9Dui"))()
 
+-- ====================================================================
+--  功能
+-- ====================================================================
 local UIS = game:GetService("UserInputService")
 local VIM = game:GetService("VirtualInputManager")
 local Players = game:GetService("Players")
@@ -15,7 +22,7 @@ local LocalPlayer = Players.LocalPlayer
 local silent = false
 local function notify(title, content, duration)
     if silent then return end
-    Rayfield:Notify({Title = title, Content = content, Duration = duration or 3})
+    UI:Notify({Title = title, Content = content, Duration = duration or 3})
 end
 
 -- 把物件放到不會被遊戲清掉的地方
@@ -37,6 +44,7 @@ local interval = 0.1
 
 local lastAutoClick = 0
 local lastTap = 0
+local lastWarn = 0
 local DOUBLE_TAP_TIME = 0.4
 
 local function updateInterval()
@@ -55,6 +63,16 @@ end
 
 local function click()
     local x, y = getCenter()
+
+    -- 選單蓋住螢幕中央時不點，避免點到自己的介面
+    if UI:IsOverMenu(x, y) then
+        if tick() - lastWarn > 5 then
+            lastWarn = tick()
+            notify("自動點擊暫停", "選單擋住了螢幕中央，請先隱藏選單或把它拖開")
+        end
+        return
+    end
+
     lastAutoClick = tick()
     local ok = pcall(function()
         VIM:SendMouseButtonEvent(x, y, 0, true, game, 0)
@@ -738,6 +756,9 @@ local function loadConfig(quiet)
             end
         end
         selectedPoint = nil
+        pcall(function()
+            PointDropdown:Set({})
+        end)
         refreshPoints()
     end
 
@@ -747,261 +768,17 @@ local function loadConfig(quiet)
     end
 end
 
--- ========== 浮動按鈕（隱藏選單後用來叫回） ==========
-local menuVisible = true
-local floatGui = nil
-
--- 記住 Rayfield 主選單位置，隱藏後再顯示時還原
-local savedMenuPos = nil
-local restoring = false
-local cachedMain = nil
-
-local function getRayfieldMain()
-    if cachedMain and cachedMain.Parent then
-        return cachedMain
-    end
-    local roots = {}
-    if gethui then
-        local ok, h = pcall(gethui)
-        if ok and h then table.insert(roots, h) end
-    end
-    table.insert(roots, game:GetService("CoreGui"))
-    local pg = LocalPlayer:FindFirstChild("PlayerGui")
-    if pg then table.insert(roots, pg) end
-
-    for _, root in ipairs(roots) do
-        for _, gui in ipairs(root:GetChildren()) do
-            if gui:IsA("ScreenGui") and gui ~= floatGui then
-                local main = gui:FindFirstChild("Main")
-                if main and gui:FindFirstChild("Prompt") then
-                    cachedMain = main
-                    return main
-                end
-            end
-        end
-    end
-end
-
-local function setMenuVisible(v)
-    -- 隱藏前先記住目前位置
-    if not v and not restoring then
-        local main = getRayfieldMain()
-        if main then savedMenuPos = main.Position end
-    end
-
-    menuVisible = v
-    pcall(function()
-        Rayfield:SetVisibility(v)
-    end)
-
-    -- 顯示後把位置還原（Rayfield 會把它重設到中央，所以連續套用幾次）
-    if v and savedMenuPos then
-        restoring = true
-        task.spawn(function()
-            for _ = 1, 5 do
-                local m = getRayfieldMain()
-                if m then m.Position = savedMenuPos end
-                task.wait(0.1)
-            end
-            restoring = false
-        end)
-    end
-end
-
--- 持續記錄選單位置（連用 Rayfield 自己的 X 關掉也能記住）
-task.spawn(function()
-    while true do
-        if menuVisible and not restoring then
-            local m = getRayfieldMain()
-            if m and m.Visible then
-                savedMenuPos = m.Position
-            end
-        end
-        task.wait(0.2)
-    end
-end)
-
--- 切換選單（會先跟 Rayfield 目前的顯示狀態同步，避免用 Rayfield 自己的 X 關掉後狀態對不上）
-local function toggleMenu()
-    local ok, vis = pcall(function()
-        return Rayfield:IsVisible()
-    end)
-    if ok and type(vis) == "boolean" then
-        menuVisible = vis
-    end
-    setMenuVisible(not menuVisible)
-end
-
-local function ensureFloatButton()
-    if floatGui and floatGui.Parent then
-        return
-    end
-
-    floatGui = Instance.new("ScreenGui")
-    floatGui.Name = "KaiFloat"
-    floatGui.ResetOnSpawn = false
-    floatGui.IgnoreGuiInset = true
-    floatGui.DisplayOrder = 999
-    parentSafe(floatGui)
-
-    local btn = Instance.new("TextButton")
-    btn.Size = UDim2.fromOffset(44, 44)
-    btn.Position = UDim2.new(0, 10, 0.4, 0)
-    btn.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
-    btn.BackgroundTransparency = 0.25
-    btn.Text = "卡"
-    btn.TextColor3 = Color3.new(1, 1, 1)
-    btn.Font = Enum.Font.GothamBold
-    btn.TextSize = 20
-    btn.AutoButtonColor = false
-    btn.Parent = floatGui
-
-    local corner = Instance.new("UICorner")
-    corner.CornerRadius = UDim.new(1, 0)
-    corner.Parent = btn
-
-    local dragging, moved = false, false
-    local dragStart, startPos
-
-    btn.InputBegan:Connect(function(input)
-        local t = input.UserInputType
-        if t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.Touch then
-            dragging = true
-            moved = false
-            dragStart = Vector2.new(input.Position.X, input.Position.Y)
-            startPos = btn.Position
-            input.Changed:Connect(function()
-                if input.UserInputState == Enum.UserInputState.End then
-                    dragging = false
-                    if not moved then
-                        toggleMenu()
-                    end
-                end
-            end)
-        end
-    end)
-
-    UIS.InputChanged:Connect(function(input)
-        if not dragging then
-            return
-        end
-        local t = input.UserInputType
-        if t == Enum.UserInputType.MouseMovement or t == Enum.UserInputType.Touch then
-            local delta = Vector2.new(input.Position.X, input.Position.Y) - dragStart
-            if delta.Magnitude > 8 then
-                moved = true
-            end
-            if moved then
-                btn.Position = UDim2.new(
-                    startPos.X.Scale, startPos.X.Offset + delta.X,
-                    startPos.Y.Scale, startPos.Y.Offset + delta.Y
-                )
-            end
-        end
-    end)
-end
-
 -- ========== 介面 ==========
-local Window = Rayfield:CreateWindow({
+local Window = UI:CreateWindow({
     Name = "卡依腳本",
-    LoadingTitle = "卡依腳本",
-    LoadingSubtitle = "Rayfield",
-    ConfigurationSaving = {
-        Enabled = false,
-    },
-    KeySystem = false,
-    Theme = {
-        TextColor = Color3.fromRGB(240, 240, 240),
-
-        Background = Color3.fromRGB(0, 0, 0),
-        Topbar = Color3.fromRGB(10, 10, 10),
-        Shadow = Color3.fromRGB(0, 0, 0),
-
-        NotificationBackground = Color3.fromRGB(10, 10, 10),
-        NotificationActionsBackground = Color3.fromRGB(230, 230, 230),
-
-        TabBackground = Color3.fromRGB(20, 20, 20),
-        TabStroke = Color3.fromRGB(40, 40, 40),
-        TabBackgroundSelected = Color3.fromRGB(45, 45, 45),
-        TabTextColor = Color3.fromRGB(200, 200, 200),
-        SelectedTabTextColor = Color3.fromRGB(255, 255, 255),
-
-        ElementBackground = Color3.fromRGB(15, 15, 15),
-        ElementBackgroundHover = Color3.fromRGB(28, 28, 28),
-        SecondaryElementBackground = Color3.fromRGB(8, 8, 8),
-        ElementStroke = Color3.fromRGB(40, 40, 40),
-        SecondaryElementStroke = Color3.fromRGB(30, 30, 30),
-
-        SliderBackground = Color3.fromRGB(60, 60, 60),
-        SliderProgress = Color3.fromRGB(150, 150, 150),
-        SliderStroke = Color3.fromRGB(90, 90, 90),
-
-        ToggleBackground = Color3.fromRGB(15, 15, 15),
-        ToggleEnabled = Color3.fromRGB(220, 220, 220),
-        ToggleDisabled = Color3.fromRGB(80, 80, 80),
-        ToggleEnabledStroke = Color3.fromRGB(255, 255, 255),
-        ToggleDisabledStroke = Color3.fromRGB(110, 110, 110),
-        ToggleEnabledOuterStroke = Color3.fromRGB(100, 100, 100),
-        ToggleDisabledOuterStroke = Color3.fromRGB(40, 40, 40),
-
-        DropdownSelected = Color3.fromRGB(30, 30, 30),
-        DropdownUnselected = Color3.fromRGB(15, 15, 15),
-
-        InputBackground = Color3.fromRGB(10, 10, 10),
-        InputStroke = Color3.fromRGB(60, 60, 60),
-        PlaceholderColor = Color3.fromRGB(150, 150, 150),
-    },
 })
 
--- 一載入就建立浮動按鈕（點一下隱藏／顯示選單，可拖曳）
-ensureFloatButton()
-
--- 移除 Rayfield 自己的「重新開啟」按鈕（Prompt），只用上面的浮動按鈕
-task.spawn(function()
-    local function findPrompts()
-        local roots = {}
-        if gethui then
-            local ok, h = pcall(gethui)
-            if ok and h then table.insert(roots, h) end
-        end
-        table.insert(roots, game:GetService("CoreGui"))
-        local pg = LocalPlayer:FindFirstChild("PlayerGui")
-        if pg then table.insert(roots, pg) end
-
-        local found = {}
-        for _, root in ipairs(roots) do
-            for _, gui in ipairs(root:GetChildren()) do
-                if gui:IsA("ScreenGui") and gui ~= floatGui then
-                    local main = gui:FindFirstChild("Main")
-                    local prompt = gui:FindFirstChild("Prompt")
-                    if main and prompt then
-                        table.insert(found, prompt)
-                    end
-                end
-            end
-        end
-        return found
-    end
-
-    while true do
-        for _, prompt in ipairs(findPrompts()) do
-            pcall(function()
-                if prompt.Visible then
-                    prompt.Visible = false
-                end
-            end)
-        end
-        task.wait(0.2)
-    end
-end)
-
 -- ---------- 主要 ----------
-local Tab = Window:CreateTab("主要", 4483362458)
+local Tab = Window:CreateTab("主要")
 
 local Toggle = Tab:CreateToggle({
     Name = "啟用自動點擊（點螢幕正中央）",
     CurrentValue = false,
-    Flag = "AutoClickToggle",
     Callback = function(v)
         enabled = v
     end,
@@ -1010,7 +787,6 @@ local Toggle = Tab:CreateToggle({
 local tShortcut = Tab:CreateToggle({
     Name = "啟用雙擊開關捷徑",
     CurrentValue = false,
-    Flag = "ShortcutToggle",
     Callback = function(v)
         shortcutEnabled = v
         lastTap = 0
@@ -1022,11 +798,12 @@ local dUnit = Tab:CreateDropdown({
     Name = "時間單位",
     Options = {"毫秒", "秒"},
     CurrentOption = {"毫秒"},
-    MultipleOptions = false,
-    Flag = "AutoClickUnit",
     Callback = function(opt)
-        unit = type(opt) == "table" and opt[1] or opt
-        updateInterval()
+        local u = type(opt) == "table" and opt[1] or opt
+        if u == "毫秒" or u == "秒" then
+            unit = u
+            updateInterval()
+        end
     end,
 })
 regDropdown("clickUnit", dUnit, function() return unit end, function(v)
@@ -1037,8 +814,6 @@ end)
 local iInterval = Tab:CreateInput({
     Name = "點擊間隔（輸入數字）",
     PlaceholderText = "例如 100 或 0.5",
-    RemoveTextAfterFocusLost = false,
-    Flag = "AutoClickInterval",
     Callback = function(text)
         local n = tonumber(text)
         if n and n > 0 then
@@ -1056,7 +831,7 @@ regNumber("clickValue", iInterval, function() return value end, function(v)
 end)
 
 -- ---------- 修改器 ----------
-local ModTab = Window:CreateTab("修改器", 4483362458)
+local ModTab = Window:CreateTab("修改器")
 
 -- 速度
 ModTab:CreateSection("速度")
@@ -1064,7 +839,6 @@ ModTab:CreateSection("速度")
 local tSpeed = ModTab:CreateToggle({
     Name = "啟用速度修改",
     CurrentValue = false,
-    Flag = "SpeedToggle",
     Callback = function(v)
         speedOn = v
         local hum = getHumanoid()
@@ -1082,8 +856,6 @@ regToggle("speedOn", tSpeed, function() return speedOn end)
 local iSpeed = ModTab:CreateInput({
     Name = "速度（輸入數字）",
     PlaceholderText = "預設 16，例如 50",
-    RemoveTextAfterFocusLost = false,
-    Flag = "SpeedInput",
     Callback = function(text)
         local n = tonumber(text)
         if n and n >= 0 then
@@ -1102,7 +874,6 @@ ModTab:CreateSection("跳躍")
 local tJump = ModTab:CreateToggle({
     Name = "啟用跳躍修改",
     CurrentValue = false,
-    Flag = "JumpToggle",
     Callback = function(v)
         jumpOn = v
         local hum = getHumanoid()
@@ -1124,8 +895,6 @@ regToggle("jumpOn", tJump, function() return jumpOn end)
 local iJump = ModTab:CreateInput({
     Name = "跳躍力（輸入數字）",
     PlaceholderText = "預設 50，例如 100",
-    RemoveTextAfterFocusLost = false,
-    Flag = "JumpInput",
     Callback = function(text)
         local n = tonumber(text)
         if n and n >= 0 then
@@ -1141,7 +910,6 @@ regNumber("jumpVal", iJump, function() return jumpVal end, function(v) jumpVal =
 local tInfJump = ModTab:CreateToggle({
     Name = "無限跳",
     CurrentValue = false,
-    Flag = "InfJumpToggle",
     Callback = function(v)
         infJumpOn = v
     end,
@@ -1154,7 +922,6 @@ ModTab:CreateSection("畫面")
 local tBright = ModTab:CreateToggle({
     Name = "啟用亮度修改",
     CurrentValue = false,
-    Flag = "BrightToggle",
     Callback = function(v)
         brightOn = v
         if v then
@@ -1169,8 +936,6 @@ regToggle("brightOn", tBright, function() return brightOn end)
 local iBright = ModTab:CreateInput({
     Name = "亮度（輸入數字）",
     PlaceholderText = "例如 2，越大越亮",
-    RemoveTextAfterFocusLost = false,
-    Flag = "BrightInput",
     Callback = function(text)
         local n = tonumber(text)
         if n and n >= 0 then
@@ -1186,7 +951,6 @@ regNumber("brightVal", iBright, function() return brightVal end, function(v) bri
 local tFog = ModTab:CreateToggle({
     Name = "去霧",
     CurrentValue = false,
-    Flag = "NoFogToggle",
     Callback = function(v)
         fogOn = v
         if v then
@@ -1201,7 +965,6 @@ regToggle("fog", tFog, function() return fogOn end)
 local tFilter = ModTab:CreateToggle({
     Name = "去濾鏡",
     CurrentValue = false,
-    Flag = "NoFilterToggle",
     Callback = function(v)
         filterOn = v
         if v then
@@ -1216,7 +979,6 @@ regToggle("filter", tFilter, function() return filterOn end)
 local tFov = ModTab:CreateToggle({
     Name = "啟用視野（FOV）修改",
     CurrentValue = false,
-    Flag = "FovToggle",
     Callback = function(v)
         fovOn = v
         local cam = workspace.CurrentCamera
@@ -1232,8 +994,6 @@ regToggle("fovOn", tFov, function() return fovOn end)
 local iFov = ModTab:CreateInput({
     Name = "視野（輸入數字）",
     PlaceholderText = "預設 70，範圍 1~120",
-    RemoveTextAfterFocusLost = false,
-    Flag = "FovInput",
     Callback = function(text)
         local n = tonumber(text)
         if n and n >= 1 and n <= 120 then
@@ -1249,7 +1009,6 @@ regNumber("fovVal", iFov, function() return fovVal end, function(v) fovVal = v e
 local tBoost = ModTab:CreateToggle({
     Name = "FPS 提升（關陰影、降畫質、關特效）",
     CurrentValue = false,
-    Flag = "BoostToggle",
     Callback = function(v)
         boostOn = v
         if v then
@@ -1267,7 +1026,6 @@ ModTab:CreateSection("移動")
 local tFly = ModTab:CreateToggle({
     Name = "啟用飛行",
     CurrentValue = false,
-    Flag = "FlyToggle",
     Callback = function(v)
         flyOn = v
         if not v then
@@ -1280,8 +1038,6 @@ regToggle("flyOn", tFly, function() return flyOn end)
 local iFly = ModTab:CreateInput({
     Name = "飛行速度（輸入數字）",
     PlaceholderText = "例如 50",
-    RemoveTextAfterFocusLost = false,
-    Flag = "FlyInput",
     Callback = function(text)
         local n = tonumber(text)
         if n and n >= 0 then
@@ -1297,7 +1053,6 @@ regNumber("flyVal", iFly, function() return flyVal end, function(v) flyVal = v e
 local tNoclip = ModTab:CreateToggle({
     Name = "穿牆（Noclip）",
     CurrentValue = false,
-    Flag = "NoclipToggle",
     Callback = function(v)
         noclipOn = v
         if not v then
@@ -1310,7 +1065,6 @@ regToggle("noclip", tNoclip, function() return noclipOn end)
 local tGrav = ModTab:CreateToggle({
     Name = "啟用重力修改",
     CurrentValue = false,
-    Flag = "GravToggle",
     Callback = function(v)
         gravOn = v
         if v then
@@ -1325,8 +1079,6 @@ regToggle("gravOn", tGrav, function() return gravOn end)
 local iGrav = ModTab:CreateInput({
     Name = "重力（輸入數字）",
     PlaceholderText = "預設 196.2，越小越輕",
-    RemoveTextAfterFocusLost = false,
-    Flag = "GravInput",
     Callback = function(text)
         local n = tonumber(text)
         if n and n >= 0 then
@@ -1345,7 +1097,6 @@ ModTab:CreateSection("透視（ESP）")
 local tEspText = ModTab:CreateToggle({
     Name = "玩家透視（名字、距離、血量）",
     CurrentValue = false,
-    Flag = "EspTextToggle",
     Callback = function(v)
         espTextOn = v
         if not (espTextOn or espHlOn) then
@@ -1358,7 +1109,6 @@ regToggle("espText", tEspText, function() return espTextOn end)
 local tEspHl = ModTab:CreateToggle({
     Name = "玩家高光（輪廓）",
     CurrentValue = false,
-    Flag = "EspHlToggle",
     Callback = function(v)
         espHlOn = v
         if not (espTextOn or espHlOn) then
@@ -1371,7 +1121,6 @@ regToggle("espHl", tEspHl, function() return espHlOn end)
 local tEspTeam = ModTab:CreateToggle({
     Name = "透視時不顯示隊友",
     CurrentValue = false,
-    Flag = "EspTeamToggle",
     Callback = function(v)
         espHideTeam = v
     end,
@@ -1384,7 +1133,6 @@ ModTab:CreateSection("傳送")
 local tClickTp = ModTab:CreateToggle({
     Name = "點擊傳送（輕點地面就傳過去）",
     CurrentValue = false,
-    Flag = "ClickTpToggle",
     Callback = function(v)
         clickTpOn = v
     end,
@@ -1407,8 +1155,6 @@ local PlayerDropdown = ModTab:CreateDropdown({
     Name = "選擇玩家",
     Options = playerNames(),
     CurrentOption = {},
-    MultipleOptions = false,
-    Flag = "TpPlayerDropdown",
     Callback = function(opt)
         selectedName = type(opt) == "table" and opt[1] or opt
     end,
@@ -1455,8 +1201,6 @@ ModTab:CreateSection("位置點")
 ModTab:CreateInput({
     Name = "位置點名稱（可不填）",
     PlaceholderText = "例如 基地",
-    RemoveTextAfterFocusLost = false,
-    Flag = "PointNameInput",
     Callback = function(text)
         pointNameInput = text or ""
     end,
@@ -1486,8 +1230,6 @@ PointDropdown = ModTab:CreateDropdown({
     Name = "選擇位置點",
     Options = {},
     CurrentOption = {},
-    MultipleOptions = false,
-    Flag = "PointDropdown",
     Callback = function(opt)
         selectedPoint = type(opt) == "table" and opt[1] or opt
     end,
@@ -1516,6 +1258,9 @@ ModTab:CreateButton({
         if p then
             table.remove(points, i)
             selectedPoint = nil
+            pcall(function()
+                PointDropdown:Set({})
+            end)
             refreshPoints()
             notify("已刪除", "位置點「" .. p.name .. "」")
         else
@@ -1530,7 +1275,6 @@ ModTab:CreateSection("其他")
 local tAfk = ModTab:CreateToggle({
     Name = "防掛機（Anti-AFK）",
     CurrentValue = false,
-    Flag = "AntiAfkToggle",
     Callback = function(v)
         antiAfkOn = v
     end,
@@ -1552,7 +1296,7 @@ ModTab:CreateButton({
 })
 
 -- ---------- 設定 ----------
-local SetTab = Window:CreateTab("設定", 4483362458)
+local SetTab = Window:CreateTab("設定")
 
 SetTab:CreateSection("設定檔")
 
@@ -1573,7 +1317,6 @@ SetTab:CreateButton({
 local tAutoload = SetTab:CreateToggle({
     Name = "啟動時自動載入設定",
     CurrentValue = false,
-    Flag = "AutoLoadToggle",
     Callback = function(v)
         autoloadOn = v
     end,
@@ -1583,17 +1326,15 @@ regToggle("autoload", tAutoload, function() return autoloadOn end)
 SetTab:CreateSection("介面與聲音")
 
 SetTab:CreateButton({
-    Name = "隱藏選單（用「卡」小按鈕叫回）",
+    Name = "隱藏選單（會出現可拖曳的小按鈕）",
     Callback = function()
-        ensureFloatButton()
-        setMenuVisible(false)
+        UI:SetVisibility(false)
     end,
 })
 
 local tMute = SetTab:CreateToggle({
     Name = "遊戲靜音",
     CurrentValue = false,
-    Flag = "MuteToggle",
     Callback = function(v)
         muteOn = v
         if v then
@@ -1606,8 +1347,8 @@ local tMute = SetTab:CreateToggle({
 regToggle("mute", tMute, function() return muteOn end)
 
 -- 快速點擊兩下螢幕 = 開關自動點擊（需先開啟「啟用雙擊開關捷徑」）
-UIS.InputBegan:Connect(function(input)
-    if not shortcutEnabled then
+UIS.InputBegan:Connect(function(input, processed)
+    if not shortcutEnabled or processed then
         return
     end
 
