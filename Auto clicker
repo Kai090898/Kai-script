@@ -811,6 +811,135 @@ local Window = UI:CreateWindow({
     Name = "卡依腳本",
 })
 
+-- ========== 語言（中文 / 英文功能名稱）==========
+local EN = {
+    ["卡依腳本"] = "Kai Script",
+    -- 分頁
+    ["主要"] = "Main",
+    ["修改器"] = "Modifiers",
+    ["設定"] = "Settings",
+    -- 區塊
+    ["速度"] = "Speed",
+    ["跳躍"] = "Jump",
+    ["畫面"] = "Visuals",
+    ["移動"] = "Movement",
+    ["透視（ESP）"] = "ESP",
+    ["傳送"] = "Teleport",
+    ["位置點"] = "Waypoints",
+    ["其他"] = "Misc",
+    ["設定檔"] = "Config",
+    ["介面與聲音"] = "UI & Sound",
+    -- 主要
+    ["啟用自動點擊（點螢幕正中央）"] = "Auto Clicker (taps screen center)",
+    ["啟用雙擊開關捷徑"] = "Double-tap Shortcut",
+    ["時間單位"] = "Time Unit",
+    ["點擊間隔（輸入數字）"] = "Click Interval (number)",
+    ["例如 100 或 0.5"] = "e.g. 100 or 0.5",
+    -- 修改器
+    ["啟用速度修改"] = "Speed Modifier",
+    ["速度（輸入數字）"] = "Speed (number)",
+    ["預設 16，例如 50"] = "Default 16, e.g. 50",
+    ["啟用跳躍修改"] = "Jump Modifier",
+    ["跳躍力（輸入數字）"] = "Jump Power (number)",
+    ["預設 50，例如 100"] = "Default 50, e.g. 100",
+    ["無限跳"] = "Infinite Jump",
+    ["啟用亮度修改"] = "Brightness Modifier",
+    ["亮度（輸入數字）"] = "Brightness (number)",
+    ["例如 2，越大越亮"] = "e.g. 2, higher = brighter",
+    ["去霧"] = "No Fog",
+    ["去濾鏡"] = "No Filters",
+    ["啟用視野（FOV）修改"] = "FOV Modifier",
+    ["視野（輸入數字）"] = "FOV (number)",
+    ["預設 70，範圍 1~120"] = "Default 70, range 1-120",
+    ["FPS 提升（關陰影、降畫質、關特效）"] = "FPS Boost (no shadows, low quality, no effects)",
+    ["啟用飛行"] = "Fly",
+    ["飛行速度（輸入數字）"] = "Fly Speed (number)",
+    ["例如 50"] = "e.g. 50",
+    ["穿牆（Noclip）"] = "Noclip",
+    ["防被撞飛（角色透明、別人碰不到）"] = "Anti-Fling (transparent, untouchable)",
+    ["啟用重力修改"] = "Gravity Modifier",
+    ["重力（輸入數字）"] = "Gravity (number)",
+    ["預設 196.2，越小越輕"] = "Default 196.2, lower = lighter",
+    ["玩家透視（名字、距離、血量）"] = "Player ESP (name, distance, HP)",
+    ["玩家高光（輪廓）"] = "Player Highlight (outline)",
+    ["透視時不顯示隊友"] = "Hide Teammates in ESP",
+    ["點擊傳送（輕點地面就傳過去）"] = "Click Teleport (tap the ground)",
+    ["選擇玩家"] = "Select Player",
+    ["重新整理玩家清單"] = "Refresh Player List",
+    ["傳送到選擇的玩家"] = "Teleport to Selected Player",
+    ["位置點名稱（可不填）"] = "Waypoint Name (optional)",
+    ["例如 基地"] = "e.g. Base",
+    ["儲存目前位置"] = "Save Current Position",
+    ["選擇位置點"] = "Select Waypoint",
+    ["傳送到位置點"] = "Teleport to Waypoint",
+    ["刪除位置點"] = "Delete Waypoint",
+    ["防掛機（Anti-AFK）"] = "Anti-AFK",
+    ["重新加入（同一個伺服器）"] = "Rejoin (same server)",
+    ["換伺服器"] = "Server Hop",
+    -- 設定
+    ["儲存設定"] = "Save Settings",
+    ["載入設定"] = "Load Settings",
+    ["啟動時自動載入設定"] = "Auto-load Settings on Start",
+    ["隱藏選單（會出現可拖曳的小按鈕）"] = "Hide Menu (shows a draggable button)",
+    ["遊戲靜音"] = "Mute Game",
+    ["功能名稱改成英文"] = "English Feature Names",
+}
+
+local useEnglish = false
+local langItems = {}
+
+local function trText(zh)
+    return (useEnglish and EN[zh]) or zh
+end
+
+local function addLang(el, zh, placeholder)
+    if el and zh then
+        table.insert(langItems, {el = el, zh = zh, ph = placeholder})
+    end
+end
+
+local function applyLang()
+    pcall(function()
+        Window:SetTitle(trText("卡依腳本"))
+    end)
+    for _, it in ipairs(langItems) do
+        pcall(function()
+            it.el:SetName(trText(it.zh))
+            if it.ph and it.el.SetPlaceholder then
+                it.el:SetPlaceholder(trText(it.ph))
+            end
+        end)
+    end
+end
+
+-- 包裝建立函式：之後建立的每個項目都會自動登記，方便切換語言
+local function wrapTab(tab)
+    for _, m in ipairs({"CreateToggle", "CreateButton", "CreateInput", "CreateDropdown"}) do
+        local f = tab[m]
+        tab[m] = function(self, o)
+            local el = f(self, o)
+            addLang(el, o.Name, o.PlaceholderText)
+            return el
+        end
+    end
+    local fs = tab.CreateSection
+    tab.CreateSection = function(self, text)
+        local el = fs(self, text)
+        addLang(el, text)
+        return el
+    end
+    return tab
+end
+
+do
+    local origCreateTab = Window.CreateTab
+    Window.CreateTab = function(self, name)
+        local t = origCreateTab(self, name)
+        addLang(t, name)
+        return wrapTab(t)
+    end
+end
+
 -- ---------- 主要 ----------
 local Tab = Window:CreateTab("主要")
 
@@ -1374,6 +1503,16 @@ local tAutoload = SetTab:CreateToggle({
 regToggle("autoload", tAutoload, function() return autoloadOn end)
 
 SetTab:CreateSection("介面與聲音")
+
+local tEnglish = SetTab:CreateToggle({
+    Name = "功能名稱改成英文",
+    CurrentValue = false,
+    Callback = function(v)
+        useEnglish = v
+        applyLang()
+    end,
+})
+regToggle("english", tEnglish, function() return useEnglish end)
 
 SetTab:CreateButton({
     Name = "隱藏選單（會出現可拖曳的小按鈕）",
