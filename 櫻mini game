@@ -77,6 +77,171 @@ function tNoclip:Set(v)
     end
 end
 
+-- ===== 共用移動工具：飄（每幀定位）、下沉到地板下、走路速度 =====
+-- 撿花和翻機器人都用這一組。「飄」是用位置固定的方式移動，
+-- 不用 Anchored（鎖住的話位置不會同步給伺服器）。
+local Mover = {}
+do
+    local holding, owner = false, nil
+    local holdPos, holdTarget, holdSpeed = nil, nil, 45
+    local holdOrigin, lastFloorY = nil, nil
+    local platformSet, noclipSet = false, false
+    local origWalk = nil
+    local walkUsers = {}
+
+    local floorParams = RaycastParams.new()
+    floorParams.FilterType = Enum.RaycastFilterType.Exclude
+
+    function Mover.isHolding(who)
+        return holding and (who == nil or owner == who)
+    end
+
+    function Mover.pos()
+        return holdPos
+    end
+
+    -- 記下目前量到的地板高度（離開地底時用來回到地面）
+    function Mover.noteFloor(y)
+        lastFloorY = y
+    end
+
+    -- 從 pos 往下量地板表面的高度；量不到回傳 nil
+    function Mover.floorY(pos, extraIgnore)
+        local ignore = {}
+        if LocalPlayer.Character then
+            table.insert(ignore, LocalPlayer.Character)
+        end
+        local petals = workspace:FindFirstChild("FlowerPetals")
+        if petals then
+            table.insert(ignore, petals)
+        end
+        for _, x in ipairs(extraIgnore or {}) do
+            table.insert(ignore, x)
+        end
+        floorParams.FilterDescendantsInstances = ignore
+        local hit = workspace:Raycast(pos + Vector3.new(0, 1, 0), Vector3.new(0, -200, 0), floorParams)
+        return hit and hit.Position.Y or nil
+    end
+
+    local function resetFlags()
+        holding, owner = false, nil
+        holdTarget = nil
+        platformSet = false
+        if noclipSet then
+            noclipSet = false
+            pcall(function() tNoclip:Set(false) end)
+        end
+    end
+
+    -- 離開地底／空中：先回到地板上，再還原穿透
+    function Mover.release()
+        if not holding then
+            return
+        end
+        local root, hum = getRoot(), getHumanoid()
+        if root then
+            local up = holdOrigin
+            if holdPos and lastFloorY then
+                up = Vector3.new(holdPos.X, lastFloorY + 4, holdPos.Z)
+            end
+            if up then
+                root.CFrame = CFrame.new(up)
+                root.AssemblyLinearVelocity = Vector3.zero
+            end
+        end
+        if hum and platformSet then
+            hum.PlatformStand = false
+        end
+        resetFlags()
+    end
+
+    -- 開始用「飄」的方式控制角色；如果是另一邊在用，就接手
+    function Mover.begin(who, hum, root)
+        if holding then
+            if owner == who then
+                return
+            end
+            Mover.release()
+        end
+        holding, owner = true, who
+        holdOrigin, holdPos, holdTarget = root.Position, root.Position, nil
+        if not noclipOn then
+            noclipSet = true
+            pcall(function() tNoclip:Set(true) end)
+        end
+        if hum then
+            platformSet = true
+            hum.PlatformStand = true
+        end
+    end
+
+    function Mover.setTarget(pos, speed)
+        holdTarget = pos
+        if speed and speed > 0 then
+            holdSpeed = speed
+        end
+    end
+
+    function Mover.atTarget(tol)
+        return holding and holdPos ~= nil and holdTarget ~= nil
+            and (holdPos - holdTarget).Magnitude < (tol or 0.5)
+    end
+
+    -- 每幀把角色定在目標路徑上
+    RunService.Heartbeat:Connect(function(dt)
+        if not holding or not holdPos then
+            return
+        end
+        local root, hum = getRoot(), getHumanoid()
+        if not root or not hum or hum.Health <= 0 then
+            return
+        end
+        if holdTarget then
+            local d = holdTarget - holdPos
+            local stepLen = holdSpeed * dt
+            if d.Magnitude <= stepLen then
+                holdPos = holdTarget
+            else
+                holdPos = holdPos + d.Unit * stepLen
+            end
+        end
+        root.CFrame = CFrame.new(holdPos)
+        root.AssemblyLinearVelocity = Vector3.zero
+        root.AssemblyAngularVelocity = Vector3.zero
+    end)
+
+    LocalPlayer.CharacterAdded:Connect(function()
+        resetFlags()
+        origWalk = nil
+        walkUsers = {}
+    end)
+
+    -- 走路時的速度（WalkSpeed）：只有輸入大於 0 才會修改，關掉功能時還原
+    function Mover.applyWalkSpeed(who, hum, n)
+        if not n or n <= 0 or not hum then
+            return
+        end
+        if origWalk == nil then
+            origWalk = hum.WalkSpeed
+        end
+        walkUsers[who] = true
+        if hum.WalkSpeed ~= n then
+            hum.WalkSpeed = n
+        end
+    end
+
+    function Mover.restoreWalkSpeed(who)
+        walkUsers[who] = nil
+        if next(walkUsers) == nil and origWalk ~= nil then
+            local hum = getHumanoid()
+            if hum then
+                hum.WalkSpeed = origWalk
+            end
+            origWalk = nil
+        end
+    end
+end
+
 -- ===== 設定存檔（只存這個介面自己的設定）=====
 local CONFIG_FILE = "KaiScript_SakuraAFK.json"
 local reg = {}
@@ -174,6 +339,10 @@ do
     local zoneName = "全部"
     local onHomeChanged = function() end             -- 掛機點被自動換掉時，更新輸入框（稍後指定）
     local skipUntil = setmetatable({}, {__mode = "k"})  -- 撿不到的花先跳過一陣子
+    local petalMode = "走路"        -- 移動方式：走路 / 飄
+    local petalSpeed = 0            -- 移動速度，0 = 預設（走路用遊戲原本的，飄用 45）
+    local petalSink = false         -- 撿花時是否下沉到地板下
+    local petalDepth = 4            -- 下沉時，角色中心在地板表面下方幾格
 
     -- ===== 掛機區範圍（四個角量出來的座標）=====
     local AREA = {minX = 587, maxX = 1001, minZ = -693, maxZ = -495}
@@ -453,11 +622,17 @@ do
         return best
     end
 
+    local function petalSpeedVal()
+        return petalSpeed > 0 and petalSpeed or nil
+    end
+
     -- 走到花的落地點等它：一直更新預測位置，卡住就跳
+    -- 「飄」模式是直接飄過去；「下沉」會站到花落點正下方的地板下
     local function walkTo(hum, root, petal)
         local t0 = tick()
         local lastPos, lastCheck = root.Position, tick()
         local reachedAt = nil
+        local speed = petalSpeedVal()
         while petalOn and petal.Parent and tick() - t0 < 12 and hum.Health > 0 do
             local land, h = landingPoint(petal)
 
@@ -468,10 +643,36 @@ do
 
             -- 如果直線會踩到傳送陣，先走到繞路的中繼點
             local wp = detour(root.Position, land)
-            hum:MoveTo(wp or land)
 
             local off = land - root.Position
             local flat = Vector3.new(off.X, 0, off.Z).Magnitude
+
+            if petalMode == "飄" then
+                Mover.begin("petal", hum, root)
+                Mover.noteFloor(land.Y)
+                local target
+                if petalSink then
+                    target = Vector3.new(land.X, land.Y - petalDepth, land.Z)
+                else
+                    local g = wp or land
+                    target = Vector3.new(g.X, land.Y + 3, g.Z)
+                end
+                Mover.setTarget(target, speed or 45)
+            else
+                Mover.applyWalkSpeed("petal", hum, speed)
+                if petalSink and flat < 2.5 and h < 4 then
+                    -- 走到落點了：往下沉
+                    Mover.begin("petal", hum, root)
+                    Mover.noteFloor(land.Y)
+                    Mover.setTarget(Vector3.new(land.X, land.Y - petalDepth, land.Z), speed or 45)
+                else
+                    if Mover.isHolding("petal") then
+                        Mover.release()
+                    end
+                    hum:MoveTo(wp or land)
+                end
+            end
+
             if flat < 2.5 and h < 4 then
                 -- 花已經快落地了，站在那裡超過 1.5 秒還沒撿到，就放棄這朵
                 reachedAt = reachedAt or tick()
@@ -482,9 +683,10 @@ do
                 reachedAt = nil
             end
 
-            -- 卡住偵測：0.7 秒幾乎沒移動就跳一下（站著等花落下時不算）
+            -- 卡住偵測：0.7 秒幾乎沒移動就跳一下（站著等花落下時不算；飄的時候不用）
             if tick() - lastCheck > 0.7 then
-                if (root.Position - lastPos).Magnitude < 1 and flat > 3 then
+                if petalMode ~= "飄" and not Mover.isHolding("petal")
+                    and (root.Position - lastPos).Magnitude < 1 and flat > 3 then
                     hum.Jump = true
                 end
                 lastPos, lastCheck = root.Position, tick()
@@ -500,10 +702,14 @@ do
     local function walkHome(hum, root)
         local t0 = tick()
         local lastPos, lastCheck = root.Position, tick()
+        local speed = petalSpeedVal()
         while petalOn and goHomeOn and hum.Health > 0 and tick() - t0 < 30 do
             local off = homePos - root.Position
             local flat = Vector3.new(off.X, 0, off.Z).Magnitude
             if flat < 3 then
+                if Mover.isHolding("petal") then
+                    Mover.release()  -- 到掛機點了，回到地面站著
+                end
                 break
             end
             if nearestPetal(root) then
@@ -511,13 +717,23 @@ do
             end
 
             local wp = detour(root.Position, homePos)
-            hum:MoveTo(wp or homePos)
 
-            if tick() - lastCheck > 0.7 then
-                if (root.Position - lastPos).Magnitude < 1 then
-                    hum.Jump = true
+            if petalMode == "飄" then
+                Mover.begin("petal", hum, root)
+                Mover.setTarget(wp or homePos, speed or 45)
+            else
+                if Mover.isHolding("petal") then
+                    Mover.release()
                 end
-                lastPos, lastCheck = root.Position, tick()
+                Mover.applyWalkSpeed("petal", hum, speed)
+                hum:MoveTo(wp or homePos)
+
+                if tick() - lastCheck > 0.7 then
+                    if (root.Position - lastPos).Magnitude < 1 then
+                        hum.Jump = true
+                    end
+                    lastPos, lastCheck = root.Position, tick()
+                end
             end
             task.wait(0.15)
         end
@@ -530,7 +746,7 @@ do
                 wasOn = true
                 local root = getRoot()
                 local hum = getHumanoid()
-                if root and hum and hum.Health > 0 and not hum.Sit and not FarmAPI.holding then
+                if root and hum and hum.Health > 0 and not hum.Sit and not Mover.isHolding("flip") then
                     local petal = nearestPetal(root)
                     if petal then
                         pcall(walkTo, hum, root, petal)
@@ -551,6 +767,10 @@ do
             else
                 if wasOn then
                     wasOn = false
+                    if Mover.isHolding("petal") then
+                        pcall(Mover.release)
+                    end
+                    Mover.restoreWalkSpeed("petal")
                     local root, hum = getRoot(), getHumanoid()
                     if root and hum then
                         hum:MoveTo(root.Position)  -- 停下來
@@ -601,7 +821,7 @@ do
 
     -- 穿透開著時角色會穿過牆，所以每幀再把角色限制在區域內（離區域太遠就不處理）
     RunService.Heartbeat:Connect(function()
-        if not petalOn or FarmAPI.holding then
+        if not petalOn or Mover.isHolding() then
             return
         end
         local root = getRoot()
@@ -624,6 +844,10 @@ do
 
     UI:OnClose(function()
         petalOn = false
+        if Mover.isHolding("petal") then
+            pcall(Mover.release)
+        end
+        Mover.restoreWalkSpeed("petal")
         clearWalls()
         if autoNoclip then
             autoNoclip = false
@@ -657,6 +881,75 @@ do
         end,
     })
     regToggle("petalGoHome", tGoHome, function() return goHomeOn end)
+
+    local dPetalMove = AfkTab:CreateDropdown({
+        Name = "撿花移動方式",
+        Options = {"走路", "飄"},
+        CurrentOption = {petalMode},
+        Callback = function(opt)
+            local v = type(opt) == "table" and opt[1] or opt
+            if v == "走路" or v == "飄" then
+                petalMode = v
+                if v == "走路" and Mover.isHolding("petal") then
+                    Mover.release()
+                end
+            end
+        end,
+    })
+    regDropdown("petalMove", dPetalMove, function() return petalMode end, function(v)
+        if v == "走路" or v == "飄" then
+            petalMode = v
+        end
+    end)
+
+    local iPetalSpeed = AfkTab:CreateInput({
+        Name = "撿花移動速度（輸入數字）",
+        PlaceholderText = "0 = 預設；走路是走路速度、飄是每秒幾格",
+        Callback = function(text)
+            local n = tonumber(text)
+            if n and n >= 0 then
+                petalSpeed = n
+                if n == 0 then
+                    Mover.restoreWalkSpeed("petal")
+                end
+                notify("已設定", n == 0 and "撿花速度 = 預設" or ("撿花速度 = " .. n))
+            else
+                notify("輸入錯誤", "請輸入數字（0 = 預設）")
+            end
+        end,
+    })
+    regNumber("petalSpeed", iPetalSpeed, function() return petalSpeed end, function(v)
+        petalSpeed = v
+    end)
+
+    local tPetalSink = AfkTab:CreateToggle({
+        Name = "撿花時下沉到地板下",
+        CurrentValue = false,
+        Callback = function(v)
+            petalSink = v
+            if not v and Mover.isHolding("petal") and petalMode ~= "飄" then
+                Mover.release()
+            end
+        end,
+    })
+    regToggle("petalSink", tPetalSink, function() return petalSink end)
+
+    local iPetalDepth = AfkTab:CreateInput({
+        Name = "撿花的地板下深度（輸入數字）",
+        PlaceholderText = "預設 4，站在地板下幾格",
+        Callback = function(text)
+            local n = tonumber(text)
+            if n and n >= 0.5 and n <= 30 then
+                petalDepth = n
+                notify("已設定", "撿花的地板下深度 = " .. n)
+            else
+                notify("輸入錯誤", "請輸入 0.5 ~ 30 的數字")
+            end
+        end,
+    })
+    regNumber("petalDepth", iPetalDepth, function() return petalDepth end, function(v)
+        petalDepth = v
+    end)
 
     local function homeText()
         return string.format("%.1f, %.1f, %.1f", homePos.X, homePos.Y, homePos.Z)
@@ -728,148 +1021,57 @@ do
     local skipUntil = setmetatable({}, {__mode = "k"})
     local tFlip
 
-    -- ===== 躲到地板下翻（站在地板下面的空中點機器人）=====
-    local underOn = true          -- 翻機器人時是否躲到地板下
-    local underDepth = 4          -- 角色中心在地板表面下方幾格
-    local UNDER_SPEED = 45        -- 在地底移動的速度（格/秒）
+    -- ===== 翻機器人：移動方式 / 下沉 / 速度 =====
+    local underOn = true          -- 翻機器人時是否下沉到地板下
+    local underDepth = 4          -- 下沉時，角色中心在地板表面下方幾格
+    local flipMode = "飄"         -- 移動方式：走路 / 飄
+    local flipSpeed = 0           -- 移動速度，0 = 預設（走路用遊戲原本的，飄用 45）
     local underNote = ""          -- 顯示用：深度被限制時的說明
-    local holding = false         -- 目前是不是正在地底定住
-    local holdPos, holdTarget     -- 目前位置、要移動到的位置
-    local holdOrigin = nil        -- 下去之前的位置（找不到地板時用來回去）
-    local holdPlatform = false    -- PlatformStand 是不是我們開的
-    local flipNoclip = false      -- 穿透是不是由翻機器人幫你打開的
-    local lastFloorY = nil        -- 最近一次量到的地板高度
-
-    local floorParams = RaycastParams.new()
-    floorParams.FilterType = Enum.RaycastFilterType.Exclude
 
     -- 點擊距離（跟 approach 用同一個算法）
     local function needFor(cd)
         return math.max(math.min(cd.MaxActivationDistance, 10) - 2, 4)
     end
 
-    -- 算出機器人正下方、地板下 underDepth 格的位置
+    local function flipSpeedVal()
+        return flipSpeed > 0 and flipSpeed or nil
+    end
+
+    local function flipStop()
+        if Mover.isHolding("flip") then
+            Mover.release()
+        end
+        Mover.restoreWalkSpeed("flip")
+    end
+
+    -- 要站的位置：下沉＝機器人正下方的地板下；不下沉＝機器人旁邊的地板上方
     -- 如果深到超出點擊距離，就自動把深度縮到剛好還點得到
-    local function undergroundPos(robot, need)
-        local ignore = {robot}
-        if LocalPlayer.Character then
-            table.insert(ignore, LocalPlayer.Character)
+    local function flipTarget(robot, need)
+        local fy = Mover.floorY(robot.Position, {robot}) or (robot.Position.Y - robot.Size.Y / 2)
+        Mover.noteFloor(fy)
+        if not underOn then
+            underNote = ""
+            return Vector3.new(robot.Position.X, fy + 3, robot.Position.Z)
         end
-        local petals = workspace:FindFirstChild("FlowerPetals")
-        if petals then
-            table.insert(ignore, petals)
-        end
-        floorParams.FilterDescendantsInstances = ignore
-
-        local hit = workspace:Raycast(robot.Position, Vector3.new(0, -200, 0), floorParams)
-        local floorY = hit and hit.Position.Y or (robot.Position.Y - robot.Size.Y / 2)
-        lastFloorY = floorY
-
-        local rise = robot.Position.Y - floorY            -- 機器人中心離地板的高度
+        local rise = robot.Position.Y - fy            -- 機器人中心離地板的高度
         local depth = underDepth
         local maxDepth = need - rise - 0.5
-        local clamped = false
+        underNote = ""
         if depth > maxDepth then
             depth = math.max(maxDepth, 0.5)
-            clamped = true
+            underNote = string.format("（深度限制為 %.1f，避免超出點擊距離）", depth)
         end
-        return Vector3.new(robot.Position.X, floorY - depth, robot.Position.Z), depth, clamped
+        return Vector3.new(robot.Position.X, fy - depth, robot.Position.Z)
     end
 
-    local function startHold(root, hum)
-        if holding then
-            return
-        end
-        holding = true
-        FarmAPI.holding = true
-        holdOrigin = root.Position
-        holdPos = root.Position
-        holdTarget = nil
-        if not noclipOn then
-            flipNoclip = true
-            pcall(function() tNoclip:Set(true) end)
-        end
-        if hum then
-            holdPlatform = true
-            hum.PlatformStand = true
-        end
-    end
-
-    -- 只重置狀態（不動角色），角色重生時用
-    local function resetHoldFlags()
-        holding = false
-        FarmAPI.holding = false
-        holdTarget = nil
-        holdPlatform = false
-        if flipNoclip then
-            flipNoclip = false
-            pcall(function() tNoclip:Set(false) end)
-        end
-    end
-
-    -- 離開地底：先回到地板上，再還原穿透
-    local function stopHold()
-        if not holding then
-            return
-        end
-        local root, hum = getRoot(), getHumanoid()
-        if root then
-            local up = holdOrigin
-            if holdPos and lastFloorY then
-                up = Vector3.new(holdPos.X, lastFloorY + 4, holdPos.Z)
-            end
-            if up then
-                root.CFrame = CFrame.new(up)
-                root.AssemblyLinearVelocity = Vector3.zero
-            end
-        end
-        if hum and holdPlatform then
-            hum.PlatformStand = false
-        end
-        resetHoldFlags()
-    end
-
-    -- 每幀把角色定在地底的位置（不用 Anchored，這樣位置才會同步給伺服器）
-    RunService.Heartbeat:Connect(function(dt)
-        if not holding or not holdPos then
-            return
-        end
-        local root, hum = getRoot(), getHumanoid()
-        if not root or not hum or hum.Health <= 0 then
-            return
-        end
-        if holdTarget then
-            local d = holdTarget - holdPos
-            local stepLen = UNDER_SPEED * dt
-            if d.Magnitude <= stepLen then
-                holdPos = holdTarget
-            else
-                holdPos = holdPos + d.Unit * stepLen
-            end
-        end
-        root.CFrame = CFrame.new(holdPos)
-        root.AssemblyLinearVelocity = Vector3.zero
-        root.AssemblyAngularVelocity = Vector3.zero
-    end)
-
-    LocalPlayer.CharacterAdded:Connect(function()
-        if holding then
-            resetHoldFlags()
-        end
-    end)
-
-    -- 在地底移動到機器人正下方（進入點擊距離內）
-    local function approachUnder(hum, root, robot, cd)
+    -- 用「飄」的方式移到目標位置
+    local function glideReach(hum, robot, cd, speed)
         local need = needFor(cd)
-        startHold(root, hum)
         local t0 = tick()
-        while flipOn and underOn and robot.Parent and robot.Transparency < 0.95
+        while flipOn and robot.Parent and robot.Transparency < 0.95
             and hum.Health > 0 and tick() - t0 < 20 do
-            local target, depth, clamped = undergroundPos(robot, need)
-            holdTarget = target
-            underNote = clamped
-                and string.format("（深度限制為 %.1f，避免超出點擊距離）", depth) or ""
-            if holdPos and (holdPos - target).Magnitude < 0.5 then
+            Mover.setTarget(flipTarget(robot, need), speed)
+            if Mover.atTarget() then
                 return true
             end
             task.wait(0.05)
@@ -973,6 +1175,38 @@ do
         return false
     end
 
+    -- 到機器人旁邊（或地板下）；回傳 true 代表已經可以點了
+    local function reach(hum, root, robot, cd)
+        local speed = flipSpeedVal()
+
+        if flipMode == "飄" then
+            Mover.begin("flip", hum, root)
+            return glideReach(hum, robot, cd, speed or 45)
+        end
+
+        -- 走路
+        Mover.applyWalkSpeed("flip", hum, speed)
+        if Mover.isHolding("flip") then
+            local hp = Mover.pos()
+            local dx, dz = hp.X - robot.Position.X, hp.Z - robot.Position.Z
+            -- 不下沉，或者還在別隻機器人下面：先浮回地面
+            if not underOn or Vector3.new(dx, 0, dz).Magnitude > 3 then
+                Mover.release()
+            end
+        end
+        if not Mover.isHolding("flip") then
+            if not approach(hum, root, robot, cd) then
+                return false
+            end
+        end
+        if underOn then
+            -- 走到旁邊後，往下沉到機器人正下方
+            Mover.begin("flip", hum, root)
+            return glideReach(hum, robot, cd, speed or 45)
+        end
+        return true
+    end
+
     local function step()
         local root, hum = getRoot(), getHumanoid()
         if not (root and hum) or hum.Health <= 0 then
@@ -988,17 +1222,7 @@ do
         targetInfo = targetInfo .. string.format(" 等待+%.1fs", extraDelay) .. underNote
 
         -- 一定要到機器人旁邊才點（不能遠距點擊）
-        -- 躲地底模式：直接在地板下移動到機器人正下方，站在地板下的空中點它
-        local reached
-        if underOn then
-            reached = approachUnder(hum, root, robot, cd)
-        else
-            if holding then
-                stopHold()
-            end
-            reached = approach(hum, root, robot, cd)
-        end
-        if not reached then
+        if not reach(hum, root, robot, cd) then
             skipUntil[robot] = tick() + 5
             return
         end
@@ -1008,9 +1232,9 @@ do
             local left = flipDelay + extraDelay - (tick() - lastClickAt)
             targetInfo = string.format("%s 冷卻中，還要等 %.1f 秒", robot.Name, math.max(left, 0))
                 .. underNote
-            -- 躲地底時，每次都重新量一次位置（機器人如果會動也跟得上）
-            if underOn and holding then
-                holdTarget = undergroundPos(robot, needFor(cd))
+            -- 在地板下／空中時，每次都重新量一次位置（機器人如果會動也跟得上）
+            if Mover.isHolding("flip") then
+                Mover.setTarget(flipTarget(robot, needFor(cd)))
             end
             task.wait(0.1)
         end
@@ -1085,9 +1309,7 @@ do
                 end
                 task.wait(0.1)
             else
-                if holding then
-                    pcall(stopHold)
-                end
+                flipStop()
                 task.wait(0.3)
             end
         end
@@ -1129,14 +1351,51 @@ do
             end
             flipOn = v
             if not v then
-                pcall(stopHold)
+                pcall(flipStop)
             end
         end,
     })
     -- 不存檔：避免下次載入設定時一啟動就自動點
 
+    local dFlipMove = AfkTab:CreateDropdown({
+        Name = "翻機器人移動方式",
+        Options = {"走路", "飄"},
+        CurrentOption = {flipMode},
+        Callback = function(opt)
+            local v = type(opt) == "table" and opt[1] or opt
+            if v == "走路" or v == "飄" then
+                flipMode = v
+            end
+        end,
+    })
+    regDropdown("flipMove", dFlipMove, function() return flipMode end, function(v)
+        if v == "走路" or v == "飄" then
+            flipMode = v
+        end
+    end)
+
+    local iFlipSpeed = AfkTab:CreateInput({
+        Name = "過去翻的速度（輸入數字）",
+        PlaceholderText = "0 = 預設；走路是走路速度、飄是每秒幾格",
+        Callback = function(text)
+            local n = tonumber(text)
+            if n and n >= 0 then
+                flipSpeed = n
+                if n == 0 then
+                    Mover.restoreWalkSpeed("flip")
+                end
+                notify("已設定", n == 0 and "翻機器人速度 = 預設" or ("翻機器人速度 = " .. n))
+            else
+                notify("輸入錯誤", "請輸入數字（0 = 預設）")
+            end
+        end,
+    })
+    regNumber("flipSpeed", iFlipSpeed, function() return flipSpeed end, function(v)
+        flipSpeed = v
+    end)
+
     local tUnder = AfkTab:CreateToggle({
-        Name = "翻機器人時躲到地板下",
+        Name = "翻機器人時下沉到地板下（關閉就不下沉）",
         CurrentValue = true,
         Callback = function(v)
             underOn = v
@@ -1145,7 +1404,7 @@ do
     regToggle("flipUnder", tUnder, function() return underOn end)
 
     local iDepth = AfkTab:CreateInput({
-        Name = "地板下深度（輸入數字）",
+        Name = "翻機器人的地板下深度（輸入數字）",
         PlaceholderText = "預設 4，站在地板下幾格",
         Callback = function(text)
             local n = tonumber(text)
@@ -1197,7 +1456,7 @@ do
 
     UI:OnClose(function()
         flipOn = false
-        pcall(stopHold)
+        pcall(flipStop)
     end)
 end
 
