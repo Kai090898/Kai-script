@@ -4044,7 +4044,7 @@ end
 -- ========== 遊戲分頁：開啟獨立的小遊戲掛機介面 ==========
 do
     -- 「櫻mini game」檔案的 raw 網址（內容是 sakura_afk.lua）
-    local SAKURA_AFK_URL = "https://raw.githubusercontent.com/Kai090898/Kai-slap-battles-script/refs/heads/main/%E6%AB%BBmini%20game"
+    local SAKURA_AFK_URL = "https://raw.githubusercontent.com/Kai090898/Kai-script/refs/heads/main/%E6%AB%BBmini%20game"
     local loading = false
 
     local GameTab = Window:CreateTab("遊戲")
