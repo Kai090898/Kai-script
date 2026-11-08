@@ -951,7 +951,7 @@ local EN = {
     ["翻機器人"] = "Robot Hunt",
     ["自動翻機器人（到有結果為止）"] = "Auto Flip Robots (until a result)",
     ["翻機器人間隔（秒）"] = "Flip Interval (sec)",
-    ["預設 0.3"] = "Default 0.3",
+    ["預設 7.2（遊戲冷卻 7 秒）"] = "Default 7.2 (game cooldown is 7s)",
     ["大獎花朵數（判斷用）"] = "Jackpot Flowers (detect)",
     ["預設 3000，中大獎會增加的花朵"] = "Default 3000, flowers gained on jackpot",
     ["工具"] = "Tools",
@@ -2382,9 +2382,12 @@ ModTab:CreateSection("翻機器人")
 
 do
     local flipOn = false
-    local flipDelay = 0.3
+    local flipDelay = 7.2         -- 遊戲每 7 秒才能點一次，多留 0.2 秒保險
+    local lastClickAt = 0
     local jackpotFlowers = 3000   -- 中大獎會增加的花朵數（判斷用）
     local targetInfo = "--"        -- 目前的目標（顯示用）
+    local extraDelay = 0           -- 遊戲自己有冷卻：沒收到回應就自動多等一點
+    local failCount = setmetatable({}, {__mode = "k"})
     local lastResult, lastResultTime = nil, 0
     local skipUntil = setmetatable({}, {__mode = "k"})
     local tFlip
@@ -2497,11 +2500,19 @@ do
         end
         targetInfo = string.format("%s 透明=%.2f 距離=%d", robot.Name, robot.Transparency,
             (robot.Position - root.Position).Magnitude)
+        targetInfo = targetInfo .. string.format(" 等待+%.1fs", extraDelay)
 
         -- 一定要走到機器人旁邊才點（不能遠距點擊）
         if not approach(hum, root, robot, cd) then
             skipUntil[robot] = tick() + 5
             return
+        end
+        -- 冷卻還沒到就先站在旁邊等（走路的時間也算在冷卻裡，所以不會浪費）
+        while flipOn and robot.Parent and robot.Transparency < 0.95
+            and tick() - lastClickAt < flipDelay + extraDelay do
+            local left = flipDelay + extraDelay - (tick() - lastClickAt)
+            targetInfo = string.format("%s 冷卻中，還要等 %.1f 秒", robot.Name, math.max(left, 0))
+            task.wait(0.1)
         end
         if not (flipOn and robot.Parent) then
             return
@@ -2518,6 +2529,7 @@ do
             local f = readFlowers()
             return (f and flowersBefore) and (f - flowersBefore) or nil
         end
+        lastClickAt = tick()
         pcall(fireclickdetector, cd)
 
         -- 等伺服器回報結果
@@ -2552,7 +2564,14 @@ do
                 end
             end
         else
-            skipUntil[robot] = tick() + 5  -- 沒收到回應的先跳過
+            -- 沒收到回應：很可能還在遊戲自己的冷卻裡，不能硬點。
+            -- 自動多等 0.5 秒（最多 6 秒），同一隻最多重試 3 次才換下一隻
+            extraDelay = math.min(extraDelay + 0.5, 6)
+            failCount[robot] = (failCount[robot] or 0) + 1
+            if failCount[robot] >= 3 then
+                failCount[robot] = nil
+                skipUntil[robot] = tick() + 5
+            end
         end
     end
 
@@ -2564,7 +2583,7 @@ do
                     warn("[卡依腳本] 自動翻機器人錯誤：" .. tostring(err))
                     task.wait(1)
                 end
-                task.wait(flipDelay)
+                task.wait(0.1)
             else
                 task.wait(0.3)
             end
@@ -2612,7 +2631,7 @@ do
 
     local iFlipDelay = ModTab:CreateInput({
         Name = "翻機器人間隔（秒）",
-        PlaceholderText = "預設 0.3",
+        PlaceholderText = "預設 7.2（遊戲冷卻 7 秒）",
         Callback = function(text)
             local n = tonumber(text)
             if n and n >= 0 then
