@@ -530,7 +530,7 @@ do
                 wasOn = true
                 local root = getRoot()
                 local hum = getHumanoid()
-                if root and hum and hum.Health > 0 and not hum.Sit then
+                if root and hum and hum.Health > 0 and not hum.Sit and not FarmAPI.holding then
                     local petal = nearestPetal(root)
                     if petal then
                         pcall(walkTo, hum, root, petal)
@@ -601,7 +601,7 @@ do
 
     -- 穿透開著時角色會穿過牆，所以每幀再把角色限制在區域內（離區域太遠就不處理）
     RunService.Heartbeat:Connect(function()
-        if not petalOn then
+        if not petalOn or FarmAPI.holding then
             return
         end
         local root = getRoot()
@@ -728,6 +728,155 @@ do
     local skipUntil = setmetatable({}, {__mode = "k"})
     local tFlip
 
+    -- ===== 躲到地板下翻（站在地板下面的空中點機器人）=====
+    local underOn = true          -- 翻機器人時是否躲到地板下
+    local underDepth = 4          -- 角色中心在地板表面下方幾格
+    local UNDER_SPEED = 45        -- 在地底移動的速度（格/秒）
+    local underNote = ""          -- 顯示用：深度被限制時的說明
+    local holding = false         -- 目前是不是正在地底定住
+    local holdPos, holdTarget     -- 目前位置、要移動到的位置
+    local holdOrigin = nil        -- 下去之前的位置（找不到地板時用來回去）
+    local holdPlatform = false    -- PlatformStand 是不是我們開的
+    local flipNoclip = false      -- 穿透是不是由翻機器人幫你打開的
+    local lastFloorY = nil        -- 最近一次量到的地板高度
+
+    local floorParams = RaycastParams.new()
+    floorParams.FilterType = Enum.RaycastFilterType.Exclude
+
+    -- 點擊距離（跟 approach 用同一個算法）
+    local function needFor(cd)
+        return math.max(math.min(cd.MaxActivationDistance, 10) - 2, 4)
+    end
+
+    -- 算出機器人正下方、地板下 underDepth 格的位置
+    -- 如果深到超出點擊距離，就自動把深度縮到剛好還點得到
+    local function undergroundPos(robot, need)
+        local ignore = {robot}
+        if LocalPlayer.Character then
+            table.insert(ignore, LocalPlayer.Character)
+        end
+        local petals = workspace:FindFirstChild("FlowerPetals")
+        if petals then
+            table.insert(ignore, petals)
+        end
+        floorParams.FilterDescendantsInstances = ignore
+
+        local hit = workspace:Raycast(robot.Position, Vector3.new(0, -200, 0), floorParams)
+        local floorY = hit and hit.Position.Y or (robot.Position.Y - robot.Size.Y / 2)
+        lastFloorY = floorY
+
+        local rise = robot.Position.Y - floorY            -- 機器人中心離地板的高度
+        local depth = underDepth
+        local maxDepth = need - rise - 0.5
+        local clamped = false
+        if depth > maxDepth then
+            depth = math.max(maxDepth, 0.5)
+            clamped = true
+        end
+        return Vector3.new(robot.Position.X, floorY - depth, robot.Position.Z), depth, clamped
+    end
+
+    local function startHold(root, hum)
+        if holding then
+            return
+        end
+        holding = true
+        FarmAPI.holding = true
+        holdOrigin = root.Position
+        holdPos = root.Position
+        holdTarget = nil
+        if not noclipOn then
+            flipNoclip = true
+            pcall(function() tNoclip:Set(true) end)
+        end
+        if hum then
+            holdPlatform = true
+            hum.PlatformStand = true
+        end
+    end
+
+    -- 只重置狀態（不動角色），角色重生時用
+    local function resetHoldFlags()
+        holding = false
+        FarmAPI.holding = false
+        holdTarget = nil
+        holdPlatform = false
+        if flipNoclip then
+            flipNoclip = false
+            pcall(function() tNoclip:Set(false) end)
+        end
+    end
+
+    -- 離開地底：先回到地板上，再還原穿透
+    local function stopHold()
+        if not holding then
+            return
+        end
+        local root, hum = getRoot(), getHumanoid()
+        if root then
+            local up = holdOrigin
+            if holdPos and lastFloorY then
+                up = Vector3.new(holdPos.X, lastFloorY + 4, holdPos.Z)
+            end
+            if up then
+                root.CFrame = CFrame.new(up)
+                root.AssemblyLinearVelocity = Vector3.zero
+            end
+        end
+        if hum and holdPlatform then
+            hum.PlatformStand = false
+        end
+        resetHoldFlags()
+    end
+
+    -- 每幀把角色定在地底的位置（不用 Anchored，這樣位置才會同步給伺服器）
+    RunService.Heartbeat:Connect(function(dt)
+        if not holding or not holdPos then
+            return
+        end
+        local root, hum = getRoot(), getHumanoid()
+        if not root or not hum or hum.Health <= 0 then
+            return
+        end
+        if holdTarget then
+            local d = holdTarget - holdPos
+            local stepLen = UNDER_SPEED * dt
+            if d.Magnitude <= stepLen then
+                holdPos = holdTarget
+            else
+                holdPos = holdPos + d.Unit * stepLen
+            end
+        end
+        root.CFrame = CFrame.new(holdPos)
+        root.AssemblyLinearVelocity = Vector3.zero
+        root.AssemblyAngularVelocity = Vector3.zero
+    end)
+
+    LocalPlayer.CharacterAdded:Connect(function()
+        if holding then
+            resetHoldFlags()
+        end
+    end)
+
+    -- 在地底移動到機器人正下方（進入點擊距離內）
+    local function approachUnder(hum, root, robot, cd)
+        local need = needFor(cd)
+        startHold(root, hum)
+        local t0 = tick()
+        while flipOn and underOn and robot.Parent and robot.Transparency < 0.95
+            and hum.Health > 0 and tick() - t0 < 20 do
+            local target, depth, clamped = undergroundPos(robot, need)
+            holdTarget = target
+            underNote = clamped
+                and string.format("（深度限制為 %.1f，避免超出點擊距離）", depth) or ""
+            if holdPos and (holdPos - target).Magnitude < 0.5 then
+                return true
+            end
+            task.wait(0.05)
+        end
+        return false
+    end
+
     local function ser(v, d)
         d = d or 0
         if type(v) == "table" and d < 3 then
@@ -836,10 +985,20 @@ do
         end
         targetInfo = string.format("%s 透明=%.2f 距離=%d", robot.Name, robot.Transparency,
             (robot.Position - root.Position).Magnitude)
-        targetInfo = targetInfo .. string.format(" 等待+%.1fs", extraDelay)
+        targetInfo = targetInfo .. string.format(" 等待+%.1fs", extraDelay) .. underNote
 
-        -- 一定要走到機器人旁邊才點（不能遠距點擊）
-        if not approach(hum, root, robot, cd) then
+        -- 一定要到機器人旁邊才點（不能遠距點擊）
+        -- 躲地底模式：直接在地板下移動到機器人正下方，站在地板下的空中點它
+        local reached
+        if underOn then
+            reached = approachUnder(hum, root, robot, cd)
+        else
+            if holding then
+                stopHold()
+            end
+            reached = approach(hum, root, robot, cd)
+        end
+        if not reached then
             skipUntil[robot] = tick() + 5
             return
         end
@@ -848,6 +1007,11 @@ do
             and tick() - lastClickAt < flipDelay + extraDelay do
             local left = flipDelay + extraDelay - (tick() - lastClickAt)
             targetInfo = string.format("%s 冷卻中，還要等 %.1f 秒", robot.Name, math.max(left, 0))
+                .. underNote
+            -- 躲地底時，每次都重新量一次位置（機器人如果會動也跟得上）
+            if underOn and holding then
+                holdTarget = undergroundPos(robot, needFor(cd))
+            end
             task.wait(0.1)
         end
         if not (flipOn and robot.Parent) then
@@ -921,6 +1085,9 @@ do
                 end
                 task.wait(0.1)
             else
+                if holding then
+                    pcall(stopHold)
+                end
                 task.wait(0.3)
             end
         end
@@ -961,9 +1128,38 @@ do
                 return
             end
             flipOn = v
+            if not v then
+                pcall(stopHold)
+            end
         end,
     })
     -- 不存檔：避免下次載入設定時一啟動就自動點
+
+    local tUnder = AfkTab:CreateToggle({
+        Name = "翻機器人時躲到地板下",
+        CurrentValue = true,
+        Callback = function(v)
+            underOn = v
+        end,
+    })
+    regToggle("flipUnder", tUnder, function() return underOn end)
+
+    local iDepth = AfkTab:CreateInput({
+        Name = "地板下深度（輸入數字）",
+        PlaceholderText = "預設 4，站在地板下幾格",
+        Callback = function(text)
+            local n = tonumber(text)
+            if n and n >= 0.5 and n <= 30 then
+                underDepth = n
+                notify("已設定", "地板下深度 = " .. n)
+            else
+                notify("輸入錯誤", "請輸入 0.5 ~ 30 的數字")
+            end
+        end,
+    })
+    regNumber("flipDepth", iDepth, function() return underDepth end, function(v)
+        underDepth = v
+    end)
 
     local iFlipDelay = AfkTab:CreateInput({
         Name = "翻機器人間隔（秒）",
@@ -1001,6 +1197,7 @@ do
 
     UI:OnClose(function()
         flipOn = false
+        pcall(stopHold)
     end)
 end
 
