@@ -1863,6 +1863,7 @@ do
         local hatchMode = "Open"
         local hatchDelay = 2
         local lastPress = 0
+        local sawHidden = false   -- 按下之後，視窗有沒有消失過（代表抽蛋動畫跑過了）
         local pressCount = 0
         local statusText = "尚未偵測"
         local alive = true
@@ -1888,17 +1889,14 @@ do
             local popup = pg and pg:FindFirstChild("PetsPopup")
             local frame = popup and popup:FindFirstChild("Frame")
             if not frame then
-                statusText = "找不到抽蛋視窗 PetsPopup"
-                return nil
+                return nil, nil, "找不到抽蛋視窗 PetsPopup"
             end
             local holder = frame:FindFirstChild(hatchMode == "Open 3" and "Open3" or "Open1")
             if not holder then
-                statusText = "視窗裡找不到 " .. (hatchMode == "Open 3" and "Open3" or "Open1")
-                return nil
+                return nil, nil, "視窗裡找不到 " .. (hatchMode == "Open 3" and "Open3" or "Open1")
             end
             if not isShown(holder) then
-                statusText = "抽蛋視窗沒有顯示，請站到蛋旁邊"
-                return nil
+                return nil, nil, "hidden"  -- 視窗暫時不見（抽蛋動畫中，或還沒站到蛋旁邊）
             end
             local btn = holder:IsA("GuiButton") and holder or holder:FindFirstChildWhichIsA("GuiButton", true)
             return btn or holder, popup
@@ -1932,12 +1930,31 @@ do
         task.spawn(function()
             while alive do
                 if hatchOn then
-                    local target, gui = findHatchButton()
-                    if target and tick() - lastPress >= hatchDelay then
-                        lastPress = tick()
-                        pressCount += 1
-                        press(target, gui)
-                        statusText = "已按下 " .. hatchMode
+                    local target, gui, reason = findHatchButton()
+                    if not target then
+                        if reason == "hidden" then
+                            if tick() - lastPress < 20 then
+                                -- 剛按完不久視窗就不見，是抽蛋動畫，等它回來就好
+                                sawHidden = true
+                                statusText = "抽蛋動畫中，等視窗回來…"
+                            else
+                                statusText = "視窗沒有顯示，請站到蛋旁邊"
+                            end
+                        else
+                            statusText = reason or "找不到按鈕"
+                        end
+                    else
+                        -- 視窗在動畫之後回來了，只要稍等一下就能再按；沒消失過就照間隔
+                        local need = sawHidden and 0.6 or hatchDelay
+                        if tick() - lastPress >= need then
+                            lastPress = tick()
+                            sawHidden = false
+                            pressCount += 1
+                            press(target, gui)
+                            statusText = "已按下 " .. hatchMode
+                        else
+                            statusText = "等待下一次按下…"
+                        end
                     end
                     task.wait(0.2)
                 else
