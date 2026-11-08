@@ -2,7 +2,7 @@
 --  卡依腳本（主程式）
 --  介面庫從 GitHub 載入（檔名：卡依ui）
 -- ====================================================================
-local UI = loadstring(game:HttpGet("https://raw.githubusercontent.com/Kai090898/Kai-slap-battles-script/refs/heads/main/%E5%8D%A1%E4%BE%9Dui"))()
+local UI = loadstring(game:HttpGet("https://raw.githubusercontent.com/Kai090898/Kai-script/refs/heads/main/%E5%8D%A1%E4%BE%9Dui"))()
 
 -- ====================================================================
 --  功能
