@@ -1028,24 +1028,59 @@ do
         return true
     end
 
+    local cachedBtn = nil
+    local lastScan = 0
+    local statusText = "尚未偵測"
+
+    local function parseMultiplier(text)
+        text = text:gsub("×", "x")
+        local last
+        for n in text:gmatch("([%d%.]+)%s*[xX]") do
+            last = tonumber(n) or last
+        end
+        return last
+    end
+
+    -- 在 GreedyDemonGui 裡找文字有「提現」、而且正在顯示的按鈕
     local function findCashButton()
         local pg = LocalPlayer:FindFirstChild("PlayerGui")
         local gui = pg and pg:FindFirstChild("GreedyDemonGui")
-        local main = gui and gui:FindFirstChild("Main")
-        local btn = main and main:FindFirstChild("TextButton")
-        return btn, gui
+        if not gui then
+            statusText = "找不到 GreedyDemonGui"
+            return nil, nil
+        end
+        if cachedBtn and cachedBtn.Parent and cachedBtn.Text:find("提現") and isShown(cachedBtn) then
+            return cachedBtn, gui
+        end
+        cachedBtn = nil
+        if tick() - lastScan < 0.25 then
+            return nil, gui
+        end
+        lastScan = tick()
+        local seen = {}
+        for _, v in ipairs(gui:GetDescendants()) do
+            if v:IsA("TextButton") and isShown(v) then
+                if v.Text:find("提現") then
+                    cachedBtn = v
+                    return v, gui
+                end
+                if #seen < 3 and v.Text ~= "" then
+                    table.insert(seen, v.Text)
+                end
+            end
+        end
+        statusText = #seen > 0 and ("沒有提現按鈕，現在的按鈕：" .. table.concat(seen, "｜"))
+            or "沒有顯示中的按鈕（遊戲沒在進行？）"
+        return nil, gui
     end
 
-    -- 讀「💰 提現  112 🌸　(1.12x)」裡括號內的倍率
     local function readMultiplier(btn)
-        if not (btn and btn:IsA("TextButton") and isShown(btn)) then
+        if not btn then
             return nil
         end
-        local text = btn.Text
-        if not text:find("提現") then
-            return nil
-        end
-        return tonumber(text:match("%(([%d%.]+)%s*[xX×]%)"))
+        local m = parseMultiplier(btn.Text)
+        statusText = m and "" or ("讀不到倍率，按鈕文字：" .. btn.Text)
+        return m
     end
 
     -- 按下按鈕：先試著直接觸發按鈕的事件，不行再模擬點按鈕中心
@@ -1101,9 +1136,20 @@ do
         Name = "目前倍率  --",
         Callback = function() end,
     })
+    -- 讀不到時，在這裡顯示原因，方便找問題（點一下可以複製）
+    local reasonBtn = DemonTab:CreateButton({
+        Name = "狀態  --",
+        Callback = function()
+            if setclipboard then
+                pcall(setclipboard, statusText)
+            end
+            notify("狀態", statusText, 5)
+        end,
+    })
     task.spawn(function()
         while alive do
             multBtn:SetName("目前倍率  " .. (currentMult and string.format("%.2fx", currentMult) or "--"))
+            reasonBtn:SetName(currentMult and "狀態  偵測中" or ("狀態  " .. statusText))
             task.wait(0.2)
         end
     end)
