@@ -950,6 +950,11 @@ local EN = {
     ["地塊選擇"] = "Zone",
     ["遊戲"] = "Games",
     ["小遊戲"] = "Mini Games",
+    ["抽蛋（寵物遊戲）"] = "Egg Hatching (pet game)",
+    ["自動抽蛋"] = "Auto Hatch",
+    ["抽蛋方式"] = "Hatch Mode",
+    ["抽蛋間隔（秒）"] = "Hatch Interval (sec)",
+    ["預設 2，要等抽蛋動畫跑完"] = "Default 2, wait for the hatch animation",
     ["櫻mini game afk"] = "Sakura mini game afk",
     ["翻機器人"] = "Robot Hunt",
     ["自動翻機器人（到有結果為止）"] = "Auto Flip Robots (until a result)",
@@ -1849,6 +1854,170 @@ do
             end)
         end,
     })
+
+    -- ===== 抽蛋（寵物遊戲）：站在蛋旁邊，抽蛋視窗跳出來後自動按「Open」 =====
+    GameTab:CreateSection("抽蛋（寵物遊戲）")
+
+    do
+        local hatchOn = false
+        local hatchMode = "Open"
+        local hatchDelay = 2
+        local lastPress = 0
+        local pressCount = 0
+        local statusText = "尚未偵測"
+        local alive = true
+
+        -- 這個物件和它所有上層是不是都顯示著
+        local function isShown(obj)
+            local cur = obj
+            while cur and not cur:IsA("PlayerGui") do
+                if cur:IsA("GuiObject") and not cur.Visible then
+                    return false
+                end
+                if cur:IsA("ScreenGui") and not cur.Enabled then
+                    return false
+                end
+                cur = cur.Parent
+            end
+            return true
+        end
+
+        -- 找抽蛋視窗裡的 Open / Open 3 按鈕
+        local function findHatchButton()
+            local pg = LocalPlayer:FindFirstChild("PlayerGui")
+            local popup = pg and pg:FindFirstChild("PetsPopup")
+            local frame = popup and popup:FindFirstChild("Frame")
+            if not frame then
+                statusText = "找不到抽蛋視窗 PetsPopup"
+                return nil
+            end
+            local holder = frame:FindFirstChild(hatchMode == "Open 3" and "Open3" or "Open1")
+            if not holder then
+                statusText = "視窗裡找不到 " .. (hatchMode == "Open 3" and "Open3" or "Open1")
+                return nil
+            end
+            if not isShown(holder) then
+                statusText = "抽蛋視窗沒有顯示，請站到蛋旁邊"
+                return nil
+            end
+            local btn = holder:IsA("GuiButton") and holder or holder:FindFirstChildWhichIsA("GuiButton", true)
+            return btn or holder, popup
+        end
+
+        -- 按下按鈕：優先觸發按鈕本身的點擊事件（不受畫面上其他視窗擋住的影響），
+        -- 不行再模擬點按鈕中心
+        local function press(target, gui)
+            if target:IsA("GuiButton") and getconnections then
+                for _, sig in ipairs({target.Activated, target.MouseButton1Click}) do
+                    local ok, conns = pcall(getconnections, sig)
+                    if ok and conns and #conns > 0 then
+                        for _, c in ipairs(conns) do
+                            pcall(function() c:Fire() end)
+                        end
+                        return true
+                    end
+                end
+            end
+            local inset = Vector2.new(0, 0)
+            if gui and gui:IsA("ScreenGui") and not gui.IgnoreGuiInset then
+                inset = game:GetService("GuiService"):GetGuiInset()
+            end
+            local pos = target.AbsolutePosition + target.AbsoluteSize / 2 + inset
+            return pcall(function()
+                VIM:SendMouseButtonEvent(pos.X, pos.Y, 0, true, game, 0)
+                VIM:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 0)
+            end)
+        end
+
+        task.spawn(function()
+            while alive do
+                if hatchOn then
+                    local target, gui = findHatchButton()
+                    if target and tick() - lastPress >= hatchDelay then
+                        lastPress = tick()
+                        pressCount += 1
+                        press(target, gui)
+                        statusText = "已按下 " .. hatchMode
+                    end
+                    task.wait(0.2)
+                else
+                    task.wait(0.4)
+                end
+            end
+        end)
+
+        local tHatch = GameTab:CreateToggle({
+            Name = "自動抽蛋",
+            CurrentValue = false,
+            Callback = function(v)
+                hatchOn = v
+                if v then
+                    pressCount = 0
+                    lastPress = 0
+                end
+            end,
+        })
+        -- 不存檔：避免下次載入設定時一啟動就自己開始抽
+
+        local dHatchMode = GameTab:CreateDropdown({
+            Name = "抽蛋方式",
+            Options = {"Open", "Open 3"},
+            CurrentOption = {hatchMode},
+            Callback = function(opt)
+                local m = type(opt) == "table" and opt[1] or opt
+                if m == "Open" or m == "Open 3" then
+                    hatchMode = m
+                end
+            end,
+        })
+        regDropdown("hatchMode", dHatchMode, function() return hatchMode end, function(v)
+            hatchMode = v
+        end)
+
+        local iHatchDelay = GameTab:CreateInput({
+            Name = "抽蛋間隔（秒）",
+            PlaceholderText = "預設 2，要等抽蛋動畫跑完",
+            Callback = function(text)
+                local n = tonumber(text)
+                if n and n >= 0.2 then
+                    hatchDelay = n
+                    notify("已設定", "抽蛋間隔 = " .. n .. " 秒")
+                else
+                    notify("輸入錯誤", "請輸入 0.2 以上的數字")
+                end
+            end,
+        })
+        regNumber("hatchDelay", iHatchDelay, function() return hatchDelay end, function(v)
+            hatchDelay = v
+        end)
+
+        -- 顯示目前狀態和已經按了幾次（點一下可以複製）
+        local n = #langItems
+        local statusBtn = GameTab:CreateButton({
+            Name = "抽蛋狀態  --",
+            Callback = function()
+                if setclipboard then
+                    pcall(setclipboard, statusText)
+                end
+                notify("抽蛋狀態", statusText, 4)
+            end,
+        })
+        while #langItems > n do
+            table.remove(langItems)
+        end
+        task.spawn(function()
+            while alive do
+                statusBtn:SetName((useEnglish and "Hatch  " or "抽蛋狀態  ") .. statusText
+                    .. "（" .. pressCount .. "）")
+                task.wait(0.4)
+            end
+        end)
+
+        UI:OnClose(function()
+            alive = false
+            hatchOn = false
+        end)
+    end
 end
 
 -- 其他
