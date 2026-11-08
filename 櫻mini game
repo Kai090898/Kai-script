@@ -1004,6 +1004,142 @@ do
     end)
 end
 
+-- ========== 貪婪惡魔：倍率到了自動提現 ==========
+do
+    local DemonTab = Window:CreateTab("貪婪惡魔")
+    local alive = true
+    local cashOn = false
+    local targetMult = 2.0
+    local lastClick = 0
+    local currentMult = nil
+
+    -- 這個物件和它所有上層是不是都顯示著
+    local function isShown(obj)
+        local cur = obj
+        while cur and not cur:IsA("PlayerGui") do
+            if cur:IsA("GuiObject") and not cur.Visible then
+                return false
+            end
+            if cur:IsA("ScreenGui") and not cur.Enabled then
+                return false
+            end
+            cur = cur.Parent
+        end
+        return true
+    end
+
+    local function findCashButton()
+        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+        local gui = pg and pg:FindFirstChild("GreedyDemonGui")
+        local main = gui and gui:FindFirstChild("Main")
+        local btn = main and main:FindFirstChild("TextButton")
+        return btn, gui
+    end
+
+    -- 讀「💰 提現  112 🌸　(1.12x)」裡括號內的倍率
+    local function readMultiplier(btn)
+        if not (btn and btn:IsA("TextButton") and isShown(btn)) then
+            return nil
+        end
+        local text = btn.Text
+        if not text:find("提現") then
+            return nil
+        end
+        return tonumber(text:match("%(([%d%.]+)%s*[xX×]%)"))
+    end
+
+    -- 按下按鈕：先試著直接觸發按鈕的事件，不行再模擬點按鈕中心
+    local function pressButton(btn, gui)
+        if getconnections then
+            for _, sig in ipairs({btn.Activated, btn.MouseButton1Click}) do
+                local ok, conns = pcall(getconnections, sig)
+                if ok and conns and #conns > 0 then
+                    for _, c in ipairs(conns) do
+                        pcall(function() c:Fire() end)
+                    end
+                    return true
+                end
+            end
+        end
+        if firesignal then
+            local ok = pcall(firesignal, btn.MouseButton1Click)
+            if ok then
+                return true
+            end
+        end
+        local VIM = game:GetService("VirtualInputManager")
+        local inset = Vector2.new(0, 0)
+        if gui and not gui.IgnoreGuiInset then
+            inset = game:GetService("GuiService"):GetGuiInset()
+        end
+        local pos = btn.AbsolutePosition + btn.AbsoluteSize / 2 + inset
+        return pcall(function()
+            VIM:SendMouseButtonEvent(pos.X, pos.Y, 0, true, game, 0)
+            VIM:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 0)
+        end)
+    end
+
+    -- 每一幀檢查倍率，到了就按提現（用 Heartbeat 讓反應越快越好）
+    RunService.Heartbeat:Connect(function()
+        if not alive then
+            return
+        end
+        local btn, gui = findCashButton()
+        local mult = readMultiplier(btn)
+        currentMult = mult
+        if cashOn and mult and mult >= targetMult and tick() - lastClick > 1.5 then
+            lastClick = tick()
+            pressButton(btn, gui)
+            notify("自動提現", string.format("倍率 %.2fx 已按下提現", mult), 2)
+        end
+    end)
+
+    DemonTab:CreateSection("自動提現")
+
+    -- 顯示目前倍率
+    local multBtn = DemonTab:CreateButton({
+        Name = "目前倍率  --",
+        Callback = function() end,
+    })
+    task.spawn(function()
+        while alive do
+            multBtn:SetName("目前倍率  " .. (currentMult and string.format("%.2fx", currentMult) or "--"))
+            task.wait(0.2)
+        end
+    end)
+
+    local tCash = DemonTab:CreateToggle({
+        Name = "自動提現（倍率到了就按）",
+        CurrentValue = false,
+        Callback = function(v)
+            cashOn = v
+        end,
+    })
+    regToggle("demonCash", tCash, function() return cashOn end)
+
+    local iTarget = DemonTab:CreateInput({
+        Name = "目標倍率（輸入數字）",
+        PlaceholderText = "預設 2，範圍 1.01 到 10",
+        Callback = function(text)
+            local n = tonumber(text)
+            if n and n > 1 and n <= 10 then
+                targetMult = n
+                notify("已設定", string.format("目標倍率 = %.2fx", n))
+            else
+                notify("輸入錯誤", "請輸入 1.01 到 10 之間的數字")
+            end
+        end,
+    })
+    regNumber("demonTarget", iTarget, function() return targetMult end, function(v)
+        targetMult = v
+    end)
+
+    UI:OnClose(function()
+        alive = false
+        cashOn = false
+    end)
+end
+
 -- ===== 設定 =====
 AfkTab:CreateSection("設定")
 
