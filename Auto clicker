@@ -948,6 +948,12 @@ local EN = {
     ["撿完花走回掛機點"] = "Return to Farm Spot",
     ["把目前位置設為掛機點"] = "Set Current Position as Farm Spot",
     ["地塊選擇"] = "Zone",
+    ["翻機器人"] = "Robot Hunt",
+    ["自動翻機器人（到有結果為止）"] = "Auto Flip Robots (until a result)",
+    ["翻機器人間隔（秒）"] = "Flip Interval (sec)",
+    ["預設 0.3"] = "Default 0.3",
+    ["大獎花朵數（判斷用）"] = "Jackpot Flowers (detect)",
+    ["預設 3000，中大獎會增加的花朵"] = "Default 3000, flowers gained on jackpot",
     ["工具"] = "Tools",
     ["量座標"] = "Measure",
     ["儲存的位置"] = "Saved",
@@ -1695,10 +1701,21 @@ do
         end
         lastHazardScan = tick()
         local list = {}
-        local scope = workspace:FindFirstChild("SakuraRestArea") or workspace
-        for _, v in ipairs(scope:GetDescendants()) do
-            if v:IsA("BasePart") and v.Name:lower():find("teleport") then
-                table.insert(list, v)
+        local scopes = {}
+        for _, name in ipairs({"SakuraRestArea", "RobotTreasureHunt"}) do
+            local f = workspace:FindFirstChild(name)
+            if f then
+                table.insert(scopes, f)
+            end
+        end
+        if #scopes == 0 then
+            scopes = {workspace}
+        end
+        for _, scope in ipairs(scopes) do
+            for _, v in ipairs(scope:GetDescendants()) do
+                if v:IsA("BasePart") and v.Name:lower():find("teleport") then
+                    table.insert(list, v)
+                end
             end
         end
         hazards = list
@@ -1815,6 +1832,9 @@ do
         end
         return nil
     end
+
+    FarmAPI.detour = detour
+    FarmAPI.inHazard = inHazard
 
     -- 預測花最後會落在哪裡：往正下方打射線找地面，
     -- 如果花是會受重力往下掉的，再把水平的飄移一起算進去
@@ -2354,6 +2374,242 @@ do
 
     UI:OnClose(function()
         alive = false
+    end)
+end
+
+-- ========== 翻機器人 ==========
+ModTab:CreateSection("翻機器人")
+
+do
+    local flipOn = false
+    local flipDelay = 0.3
+    local jackpotFlowers = 3000   -- 中大獎會增加的花朵數（判斷用）
+    local lastResult, lastResultTime = nil, 0
+    local skipUntil = setmetatable({}, {__mode = "k"})
+    local tFlip
+
+    local function ser(v, d)
+        d = d or 0
+        if type(v) == "table" and d < 3 then
+            local t = {}
+            for k, x in pairs(v) do
+                table.insert(t, tostring(k) .. "=" .. ser(x, d + 1))
+            end
+            return "{" .. table.concat(t, ", ") .. "}"
+        end
+        return tostring(v)
+    end
+
+    -- 聽伺服器傳回來的點擊結果（沒中獎時會收到 type = "miss"）
+    task.spawn(function()
+        local ev = game:GetService("ReplicatedStorage"):WaitForChild("RobotGameEvent", 10)
+        if ev and ev:IsA("RemoteEvent") then
+            ev.OnClientEvent:Connect(function(...)
+                lastResult = {...}
+                lastResultTime = tick()
+            end)
+        else
+            warn("[卡依腳本] 找不到 RobotGameEvent，自動翻機器人無法判斷結果")
+        end
+    end)
+
+    -- 讀畫面上的花朵數（例如「🌸 5897 / 5000」或「🌸 5,897」）
+    local function dig(root, ...)
+        local cur = root
+        for _, name in ipairs({...}) do
+            cur = cur and cur:FindFirstChild(name)
+        end
+        return cur
+    end
+
+    local function readFlowers()
+        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+        if not pg then
+            return nil
+        end
+        local lbl = dig(pg, "HintPurchaseUI", "FlowerCard", "FlowerText")
+            or dig(pg, "PinballGui", "Main", "Frame", "TextLabel")
+        local num = lbl and tostring(lbl.Text):match("([%d,]+)")
+        return num and tonumber((num:gsub(",", "")))
+    end
+
+    local function finish(title, msg)
+        flipOn = false
+        pcall(function() tFlip:Set(false) end)
+        notify(title, msg, 10)
+    end
+
+    local function nearestRobot(root)
+        local hunt = workspace:FindFirstChild("RobotTreasureHunt")
+        local folder = hunt and hunt:FindFirstChild("Robots")
+        if not folder then
+            return nil
+        end
+        local best, bestD, bestCd
+        for _, r in ipairs(folder:GetChildren()) do
+            if r:IsA("BasePart") and (skipUntil[r] or 0) < tick() then
+                local cd = r:FindFirstChildOfClass("ClickDetector")
+                if cd and not (FarmAPI.inHazard and FarmAPI.inHazard(r.Position)) then
+                    local d = (r.Position - root.Position).Magnitude
+                    if not bestD or d < bestD then
+                        best, bestD, bestCd = r, d, cd
+                    end
+                end
+            end
+        end
+        return best, bestCd
+    end
+
+    -- 走到機器人旁邊（進入點擊距離內）
+    local function approach(hum, root, robot, cd)
+        local need = math.max(math.min(cd.MaxActivationDistance, 10) - 2, 4)
+        local t0 = tick()
+        local lastPos, lastCheck = root.Position, tick()
+        while flipOn and robot.Parent and hum.Health > 0 and tick() - t0 < 8 do
+            if (robot.Position - root.Position).Magnitude <= need then
+                return true
+            end
+            local wp = FarmAPI.detour and FarmAPI.detour(root.Position, robot.Position)
+            hum:MoveTo(wp or robot.Position)
+            if tick() - lastCheck > 0.7 then
+                if (root.Position - lastPos).Magnitude < 1 then
+                    hum.Jump = true
+                end
+                lastPos, lastCheck = root.Position, tick()
+            end
+            task.wait(0.1)
+        end
+        return false
+    end
+
+    local function step()
+        local root, hum = getRoot(), getHumanoid()
+        if not (root and hum) or hum.Health <= 0 then
+            return
+        end
+        local robot, cd = nearestRobot(root)
+        if not robot then
+            return
+        end
+
+        -- 一定要走到機器人旁邊才點（不能遠距點擊）
+        if not approach(hum, root, robot, cd) then
+            skipUntil[robot] = tick() + 5
+            return
+        end
+        if not (flipOn and robot.Parent) then
+            return
+        end
+
+        local before = lastResultTime
+        local flowersBefore = readFlowers()
+        local function gained()
+            local f = readFlowers()
+            return (f and flowersBefore) and (f - flowersBefore) or nil
+        end
+        pcall(fireclickdetector, cd)
+
+        -- 等伺服器回報結果
+        local t0 = tick()
+        while flipOn and tick() - t0 < 2.5 and lastResultTime <= before do
+            task.wait(0.05)
+        end
+
+        if lastResultTime > before then
+            local d = lastResult and lastResult[1]
+            local kind = type(d) == "table" and d.type or d
+            if kind ~= "miss" then
+                -- 不是「沒中」：再等最多 2 秒看花朵有沒有增加，用來確認是不是真的中大獎
+                local t1, g = tick(), gained()
+                while flipOn and tick() - t1 < 2 and not (g and g >= jackpotFlowers) do
+                    task.wait(0.1)
+                    g = gained()
+                end
+                if g and g >= jackpotFlowers then
+                    finish("中大獎了！", "花朵 +" .. g)
+                else
+                    finish("收到不是 miss 的結果",
+                        "花朵沒有增加 " .. jackpotFlowers .. "，請自己確認：" .. ser(lastResult))
+                end
+            else
+                -- 就算事件寫 miss，只要花朵一次暴增也算中獎
+                local g = gained()
+                if g and g >= jackpotFlowers then
+                    finish("中大獎了！", "花朵 +" .. g)
+                end
+            end
+        else
+            skipUntil[robot] = tick() + 5  -- 沒收到回應的先跳過
+        end
+    end
+
+    task.spawn(function()
+        while true do
+            if flipOn then
+                local ok, err = pcall(step)
+                if not ok then
+                    warn("[卡依腳本] 自動翻機器人錯誤：" .. tostring(err))
+                    task.wait(1)
+                end
+                task.wait(flipDelay)
+            else
+                task.wait(0.3)
+            end
+        end
+    end)
+
+    tFlip = ModTab:CreateToggle({
+        Name = "自動翻機器人（到有結果為止）",
+        CurrentValue = false,
+        Callback = function(v)
+            if v and not fireclickdetector then
+                notify("無法啟用", "這個執行器不支援 fireclickdetector")
+                task.defer(function()
+                    pcall(function() tFlip:Set(false) end)
+                end)
+                return
+            end
+            flipOn = v
+        end,
+    })
+    -- 不存檔：避免下次載入設定時一啟動就自動點
+
+    local iFlipDelay = ModTab:CreateInput({
+        Name = "翻機器人間隔（秒）",
+        PlaceholderText = "預設 0.3",
+        Callback = function(text)
+            local n = tonumber(text)
+            if n and n >= 0 then
+                flipDelay = n
+                notify("已設定", "間隔 = " .. n .. " 秒")
+            else
+                notify("輸入錯誤", "請輸入數字")
+            end
+        end,
+    })
+    regNumber("flipDelay", iFlipDelay, function() return flipDelay end, function(v)
+        flipDelay = v
+    end)
+
+    local iJackpot = ModTab:CreateInput({
+        Name = "大獎花朵數（判斷用）",
+        PlaceholderText = "預設 3000，中大獎會增加的花朵",
+        Callback = function(text)
+            local n = tonumber(text)
+            if n and n > 0 then
+                jackpotFlowers = n
+                notify("已設定", "大獎花朵數 = " .. n)
+            else
+                notify("輸入錯誤", "請輸入大於 0 的數字")
+            end
+        end,
+    })
+    regNumber("jackpotFlowers", iJackpot, function() return jackpotFlowers end, function(v)
+        jackpotFlowers = v
+    end)
+
+    UI:OnClose(function()
+        flipOn = false
     end)
 end
 
