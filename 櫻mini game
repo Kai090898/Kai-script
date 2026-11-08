@@ -158,6 +158,7 @@ local Window = UI:CreateWindow({
     FloatPosition = UDim2.new(0, 10, 0.55, 0),
     PositionOffset = Vector2.new(30, 20),
     DisplayOrder = 101,
+    Theme = "black",  -- 額外的介面一律用純黑主題
 })
 
 local AfkTab = Window:CreateTab("掛機")
