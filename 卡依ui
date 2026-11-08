@@ -16,12 +16,35 @@ do
         sub = Color3.fromRGB(190, 190, 196),
         off = Color3.fromRGB(55, 55, 55),
     }
-    -- 灰白色透明（玻璃質感）
+    -- 主題：預設是灰白色透明（玻璃質感，主腳本用）；Theme = "black" 是純黑介面（額外的介面用）
+    local theme = "glass"
     local GLASS = Color3.fromRGB(225, 225, 232)
     local GLASS_T = 0.7        -- 平常的透明度
     local GLASS_HOVER_T = 0.55 -- 滑過去時
-    local TXT = Color3.fromRGB(0, 0, 0)        -- 主要文字（黑色）
-    local TXT_SUB = Color3.fromRGB(45, 45, 50) -- 次要文字（深灰）
+    local TXT = Color3.fromRGB(0, 0, 0)        -- 主要文字
+    local TXT_SUB = Color3.fromRGB(45, 45, 50) -- 次要文字
+    local TITLE_C, TITLE_T = GLASS, GLASS_T    -- 標題列
+    local TAB_SEL_T = 0.55                     -- 選中的分頁
+    local STROKE_C, STROKE_T = Color3.new(1, 1, 1), 0.6  -- 文字描邊
+
+    local function applyTheme(name)
+        theme = (name == "black") and "black" or "glass"
+        if theme == "black" then
+            C.sub = Color3.fromRGB(140, 140, 140)
+            GLASS, GLASS_T, GLASS_HOVER_T = C.item, 0, 0
+            TXT, TXT_SUB = C.text, C.sub
+            TITLE_C, TITLE_T = C.panel, 0
+            TAB_SEL_T = 0
+            STROKE_C, STROKE_T = Color3.new(0, 0, 0), 1
+        else
+            C.sub = Color3.fromRGB(190, 190, 196)
+            GLASS, GLASS_T, GLASS_HOVER_T = Color3.fromRGB(225, 225, 232), 0.7, 0.55
+            TXT, TXT_SUB = Color3.fromRGB(0, 0, 0), Color3.fromRGB(45, 45, 50)
+            TITLE_C, TITLE_T = GLASS, GLASS_T
+            TAB_SEL_T = 0.55
+            STROKE_C, STROKE_T = Color3.new(1, 1, 1), 0.6
+        end
+    end
     local FONT = Enum.Font.GothamMedium
     local FONT_B = Enum.Font.GothamBold
 
@@ -49,6 +72,10 @@ do
     end
 
     local function glassOutline(o)
+        if theme == "black" then
+            outline(o)
+            return
+        end
         new("UIStroke", {
             Color = Color3.fromRGB(255, 255, 255),
             Transparency = 0.75,
@@ -63,6 +90,33 @@ do
             style or Enum.EasingStyle.Quad,
             dir or Enum.EasingDirection.Out
         ), props):Play()
+    end
+
+    -- 滑過去、移開、按下去的效果（玻璃主題用透明度，黑色主題用顏色）
+    local function hoverOn(o)
+        if theme == "black" then
+            tween(o, {BackgroundColor3 = C.hover})
+        else
+            tween(o, {BackgroundTransparency = GLASS_HOVER_T})
+        end
+    end
+
+    local function hoverOff(o)
+        if theme == "black" then
+            tween(o, {BackgroundColor3 = GLASS})
+        else
+            tween(o, {BackgroundTransparency = GLASS_T})
+        end
+    end
+
+    local function pressFlash(o)
+        if theme == "black" then
+            o.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+            tween(o, {BackgroundColor3 = GLASS}, 0.25)
+        else
+            o.BackgroundTransparency = 0.4
+            tween(o, {BackgroundTransparency = GLASS_T}, 0.25)
+        end
     end
 
     -- 按下去會縮一下、放開彈回來
@@ -296,6 +350,7 @@ do
     -- ---------- 視窗 ----------
     function lib:CreateWindow(cfg)
         -- 可以同時開第二個獨立的視窗：GuiName、FloatText、FloatPosition、PositionOffset、DisplayOrder
+        applyTheme(cfg.Theme)
         local guiName = cfg.GuiName or "KaiUI"
         cleanup(guiName)
         closed = false
@@ -351,14 +406,14 @@ do
         -- 標題列
         local titleBar = new("Frame", {
             Size = UDim2.new(1, 0, 0, 36),
-            BackgroundColor3 = GLASS,
-            BackgroundTransparency = GLASS_T,
+            BackgroundColor3 = TITLE_C,
+            BackgroundTransparency = TITLE_T,
             BorderSizePixel = 0,
         }, main)
         local titleLabel = new("TextLabel", {
             Size = UDim2.new(1, -100, 1, 0), Position = UDim2.new(0, 14, 0, 0),
             BackgroundTransparency = 1, Text = cfg.Name or "UI",
-            Font = FONT_B, TextSize = 15, TextColor3 = TXT, TextStrokeColor3 = Color3.new(1,1,1), TextStrokeTransparency = 0.6,
+            Font = FONT_B, TextSize = 15, TextColor3 = TXT, TextStrokeColor3 = STROKE_C, TextStrokeTransparency = STROKE_T,
             TextXAlignment = Enum.TextXAlignment.Left,
         }, titleBar)
         local minBtn = new("TextButton", {
@@ -595,7 +650,7 @@ do
             for _, x in ipairs(tabs) do
                 local on = (x == t)
                 tween(x.btn, {
-                    BackgroundTransparency = on and 0.55 or 1,
+                    BackgroundTransparency = on and TAB_SEL_T or 1,
                     TextColor3 = on and TXT or TXT_SUB,
                 }, 0.2)
                 tween(x.bar, {Size = UDim2.new(0, 3, 0, on and 16 or 0)}, 0.25,
@@ -619,7 +674,7 @@ do
                 Size = UDim2.new(1, 0, 0, 32),
                 BackgroundColor3 = GLASS, BackgroundTransparency = 1,
                 Text = name, Font = FONT, TextSize = 13, TextColor3 = TXT_SUB,
-                TextStrokeColor3 = Color3.new(1,1,1), TextStrokeTransparency = 0.6,
+                TextStrokeColor3 = STROKE_C, TextStrokeTransparency = STROKE_T,
                 AutoButtonColor = false, LayoutOrder = tabOrder,
             }, tabList)
             round(btn, 6)
@@ -672,7 +727,7 @@ do
                     Size = size, Position = pos or UDim2.new(0, 0, 0, 0),
                     BackgroundTransparency = 1, Text = text,
                     Font = FONT, TextSize = 13, TextColor3 = TXT,
-                    TextStrokeColor3 = Color3.new(1,1,1), TextStrokeTransparency = 0.6,
+                    TextStrokeColor3 = STROKE_C, TextStrokeTransparency = STROKE_T,
                     TextXAlignment = align or Enum.TextXAlignment.Left,
                     TextWrapped = true,
                 }, parent)
@@ -684,7 +739,7 @@ do
                     Size = UDim2.new(1, 0, 0, 22),
                     BackgroundTransparency = 1, Text = string.upper(text),
                     Font = FONT_B, TextSize = 11, TextColor3 = TXT_SUB,
-                    TextStrokeColor3 = Color3.new(1,1,1), TextStrokeTransparency = 0.6,
+                    TextStrokeColor3 = STROKE_C, TextStrokeTransparency = STROKE_T,
                     TextXAlignment = Enum.TextXAlignment.Left,
                     LayoutOrder = nextOrder(),
                 }, page)
@@ -701,18 +756,17 @@ do
                     Size = UDim2.new(1, 0, 0, 38),
                     BackgroundColor3 = GLASS, BackgroundTransparency = GLASS_T, AutoButtonColor = false,
                     Text = o.Name, Font = FONT, TextSize = 13, TextColor3 = TXT,
-                    TextStrokeColor3 = Color3.new(1,1,1), TextStrokeTransparency = 0.6,
+                    TextStrokeColor3 = STROKE_C, TextStrokeTransparency = STROKE_T,
 
                     LayoutOrder = nextOrder(),
                 }, page)
                 round(b, 6)
                 glassOutline(b)
                 pressFx(b, 0.97)
-                b.MouseEnter:Connect(function() tween(b, {BackgroundTransparency = GLASS_HOVER_T}) end)
-                b.MouseLeave:Connect(function() tween(b, {BackgroundTransparency = GLASS_T}) end)
+                b.MouseEnter:Connect(function() hoverOn(b) end)
+                b.MouseLeave:Connect(function() hoverOff(b) end)
                 b.Activated:Connect(function()
-                    b.BackgroundTransparency = 0.4
-                    tween(b, {BackgroundTransparency = GLASS_T}, 0.25)
+                    pressFlash(b)
                     safe(o.Callback)
                 end)
                 local self = {}
@@ -763,8 +817,8 @@ do
                 end
                 render()
 
-                row.MouseEnter:Connect(function() tween(row, {BackgroundTransparency = GLASS_HOVER_T}) end)
-                row.MouseLeave:Connect(function() tween(row, {BackgroundTransparency = GLASS_T}) end)
+                row.MouseEnter:Connect(function() hoverOn(row) end)
+                row.MouseLeave:Connect(function() hoverOff(row) end)
                 row.Activated:Connect(function()
                     state = not state
                     render()
