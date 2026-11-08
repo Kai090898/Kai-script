@@ -2384,6 +2384,7 @@ do
     local flipOn = false
     local flipDelay = 0.3
     local jackpotFlowers = 3000   -- 中大獎會增加的花朵數（判斷用）
+    local targetInfo = "--"        -- 目前的目標（顯示用）
     local lastResult, lastResultTime = nil, 0
     local skipUntil = setmetatable({}, {__mode = "k"})
     local tFlip
@@ -2447,7 +2448,8 @@ do
         end
         local best, bestD, bestCd
         for _, r in ipairs(folder:GetChildren()) do
-            if r:IsA("BasePart") and (skipUntil[r] or 0) < tick() then
+            if r:IsA("BasePart") and (skipUntil[r] or 0) < tick()
+                and r.Transparency < 0.95 then  -- 被翻掉消失的（變透明）不點
                 local cd = r:FindFirstChildOfClass("ClickDetector")
                 if cd and not (FarmAPI.inHazard and FarmAPI.inHazard(r.Position)) then
                     local d = (r.Position - root.Position).Magnitude
@@ -2465,7 +2467,8 @@ do
         local need = math.max(math.min(cd.MaxActivationDistance, 10) - 2, 4)
         local t0 = tick()
         local lastPos, lastCheck = root.Position, tick()
-        while flipOn and robot.Parent and hum.Health > 0 and tick() - t0 < 8 do
+        while flipOn and robot.Parent and robot.Transparency < 0.95
+            and hum.Health > 0 and tick() - t0 < 8 do
             if (robot.Position - root.Position).Magnitude <= need then
                 return true
             end
@@ -2489,8 +2492,11 @@ do
         end
         local robot, cd = nearestRobot(root)
         if not robot then
+            targetInfo = "附近沒有可以點的機器人"
             return
         end
+        targetInfo = string.format("%s 透明=%.2f 距離=%d", robot.Name, robot.Transparency,
+            (robot.Position - root.Position).Magnitude)
 
         -- 一定要走到機器人旁邊才點（不能遠距點擊）
         if not approach(hum, root, robot, cd) then
@@ -2498,6 +2504,11 @@ do
             return
         end
         if not (flipOn and robot.Parent) then
+            return
+        end
+        -- 走到之後、點之前，再確認一次它還在（可能剛好被別人翻掉了）
+        if robot.Transparency >= 0.95 then
+            skipUntil[robot] = tick() + 300
             return
         end
 
@@ -2516,6 +2527,8 @@ do
         end
 
         if lastResultTime > before then
+            -- 伺服器有回應，代表這隻已經翻過了，5 分鐘內不再點（它可能只是變透明、還留在場上）
+            skipUntil[robot] = tick() + 300
             local d = lastResult and lastResult[1]
             local kind = type(d) == "table" and d.type or d
             if kind ~= "miss" then
@@ -2557,6 +2570,29 @@ do
             end
         end
     end)
+
+    -- 顯示目前正要點的機器人（除錯用，點一下可以複製）
+    do
+        local n = #langItems
+        local targetBtn = ModTab:CreateButton({
+            Name = "目前目標  --",
+            Callback = function()
+                if setclipboard then
+                    pcall(setclipboard, targetInfo)
+                end
+                notify("目前目標", targetInfo, 4)
+            end,
+        })
+        while #langItems > n do
+            table.remove(langItems)
+        end
+        task.spawn(function()
+            while true do
+                targetBtn:SetName((useEnglish and "Target  " or "目前目標  ") .. targetInfo)
+                task.wait(0.3)
+            end
+        end)
+    end
 
     tFlip = ModTab:CreateToggle({
         Name = "自動翻機器人（到有結果為止）",
