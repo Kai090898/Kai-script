@@ -295,14 +295,16 @@ do
 
     -- ---------- 視窗 ----------
     function lib:CreateWindow(cfg)
-        cleanup("KaiUI")
+        -- 可以同時開第二個獨立的視窗：GuiName、FloatText、FloatPosition、PositionOffset、DisplayOrder
+        local guiName = cfg.GuiName or "KaiUI"
+        cleanup(guiName)
         closed = false
 
         local gui = new("ScreenGui", {
-            Name = "KaiUI",
+            Name = guiName,
             ResetOnSpawn = false,
             IgnoreGuiInset = true,
-            DisplayOrder = 100,
+            DisplayOrder = cfg.DisplayOrder or 100,
             ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
         })
         mount(gui)
@@ -315,7 +317,8 @@ do
         main = new("CanvasGroup", {
             Name = "Main",
             AnchorPoint = Vector2.new(0.5, 0.5),
-            Position = UDim2.new(0, w / 2 + 10, 0.5, 0),
+            Position = UDim2.new(0, w / 2 + 10 + (cfg.PositionOffset and cfg.PositionOffset.X or 0),
+                0.5, cfg.PositionOffset and cfg.PositionOffset.Y or 0),
             Size = UDim2.fromOffset(w, h),
             BackgroundColor3 = C.bg,
             BorderSizePixel = 0,
@@ -432,9 +435,9 @@ do
         float = new("TextButton", {
             Name = "Float",
             Size = UDim2.fromOffset(44, 44),
-            Position = UDim2.new(0, 10, 0.4, 0),
+            Position = cfg.FloatPosition or UDim2.new(0, 10, 0.4, 0),
             BackgroundColor3 = C.bg,
-            Text = "卡", TextColor3 = C.text, Font = FONT_B, TextSize = 20,
+            Text = cfg.FloatText or "卡", TextColor3 = C.text, Font = FONT_B, TextSize = 20,
             AutoButtonColor = false, Visible = true,
         }, gui)
         round(float, 22)
