@@ -950,7 +950,7 @@ local EN = {
     ["地塊選擇"] = "Zone",
     ["遊戲"] = "Games",
     ["小遊戲"] = "Mini Games",
-    ["抽蛋（寵物遊戲）"] = "Egg Hatching (pet game)",
+    ["拳擊模擬器"] = "Boxing Simulator",
     ["自動抽蛋"] = "Auto Hatch",
     ["抽蛋方式"] = "Hatch Mode",
     ["抽蛋間隔（秒）"] = "Hatch Interval (sec)",
@@ -1855,14 +1855,16 @@ do
         end,
     })
 
-    -- ===== 抽蛋（寵物遊戲）：站在蛋旁邊，抽蛋視窗跳出來後自動按「Open」 =====
-    GameTab:CreateSection("抽蛋（寵物遊戲）")
+    -- ===== 拳擊模擬器：站在蛋旁邊，抽蛋視窗跳出來後自動按「Open」 =====
+    GameTab:CreateSection("拳擊模擬器")
 
     do
         local hatchOn = false
         local hatchMode = "Open"
-        local hatchDelay = 2
+        local hatchDelay = 2      -- 同時也是「按下後等多久才開始跳過動畫」
         local lastPress = 0
+        local lastClose = 0
+        local skipClicks = 0
         local sawHidden = false   -- 按下之後，視窗有沒有消失過（代表抽蛋動畫跑過了）
         local pressCount = 0
         local statusText = "尚未偵測"
@@ -1927,6 +1929,43 @@ do
             end)
         end
 
+        -- 抽蛋動畫的介面是 PetOpenUI。動畫時間到了就先模擬點螢幕（跟手動點一樣），
+        -- 點了還是沒關，就強制關掉動畫並把被遊戲關掉的介面還原
+        local function closeAnimation()
+            local pg = LocalPlayer:FindFirstChild("PlayerGui")
+            if not pg then return 0 end
+            local ui = pg:FindFirstChild("PetOpenUI")
+            if not (ui and ui.Enabled) then
+                return 0  -- 動畫已經自己結束了
+            end
+
+            if skipClicks < 3 then
+                skipClicks += 1
+                local vp = workspace.CurrentCamera.ViewportSize
+                pcall(function()
+                    VIM:SendMouseButtonEvent(vp.X / 2, vp.Y / 2, 0, true, game, 0)
+                    VIM:SendMouseButtonEvent(vp.X / 2, vp.Y / 2, 0, false, game, 0)
+                end)
+                return 1
+            end
+
+            -- 強制關閉並還原
+            ui.Enabled = false
+            local black = pg:FindFirstChild("Black")
+            if black then black.Enabled = false end
+            for _, name in ipairs({"MainUi", "QuestDescription"}) do
+                local g = pg:FindFirstChild(name)
+                if g then g.Enabled = true end
+            end
+            local popup = pg:FindFirstChild("PetsPopup")
+            if popup then
+                popup.Enabled = true
+                local f = popup:FindFirstChild("Frame")
+                if f then f.Visible = true end
+            end
+            return 1
+        end
+
         task.spawn(function()
             while alive do
                 if hatchOn then
@@ -1934,9 +1973,15 @@ do
                     if not target then
                         if reason == "hidden" then
                             if tick() - lastPress < 20 then
-                                -- 剛按完不久視窗就不見，是抽蛋動畫，等它回來就好
+                                -- 剛按完不久視窗就不見，是抽蛋動畫
                                 sawHidden = true
-                                statusText = "抽蛋動畫中，等視窗回來…"
+                                if tick() - lastPress >= hatchDelay and tick() - lastClose >= 0.5 then
+                                    lastClose = tick()
+                                    local n = closeAnimation()
+                                    statusText = n > 0 and "動畫結束，正在關閉動畫…" or "抽蛋動畫中，等視窗回來…"
+                                else
+                                    statusText = "抽蛋動畫中，等視窗回來…"
+                                end
                             else
                                 statusText = "視窗沒有顯示，請站到蛋旁邊"
                             end
@@ -1950,6 +1995,7 @@ do
                             lastPress = tick()
                             sawHidden = false
                             pressCount += 1
+                            skipClicks = 0
                             press(target, gui)
                             statusText = "已按下 " .. hatchMode
                         else
@@ -1971,6 +2017,7 @@ do
                 if v then
                     pressCount = 0
                     lastPress = 0
+                    skipClicks = 0
                 end
             end,
         })
