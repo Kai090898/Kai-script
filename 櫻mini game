@@ -83,14 +83,16 @@ end
 -- 所以改成「操作螢幕上的搖桿」：
 --   搖桿（模擬觸控）：在螢幕搖桿上模擬手指按住、推動
 --   搖桿（控制模組）：直接對遊戲的控制模組輸出搖桿的移動方向（模擬觸控沒反應時用）
+--   飄（飛行）：像主腳本的「飛行」一樣飄在地面上方移動（不會踩到傳送陣）
 --   直接走（舊方式）：原本的 MoveTo
 local GuiService = game:GetService("GuiService")
 local VIM = game:GetService("VirtualInputManager")
 
-local MODE_NAMES = {"搖桿（模擬觸控）", "搖桿（控制模組）", "直接走（舊方式）"}
+local MODE_NAMES = {"搖桿（模擬觸控）", "搖桿（控制模組）", "飄（飛行）", "直接走（舊方式）"}
 local MODE_LABELS = {
     ["搖桿（模擬觸控）"] = "touch",
     ["搖桿（控制模組）"] = "module",
+    ["飄（飛行）"] = "fly",
     ["直接走（舊方式）"] = "moveto",
 }
 
@@ -102,6 +104,12 @@ local Move = {
     touching = false,
     lx = 0, ly = 0,
     area = nil, pad = 2,     -- 撿花時用來把角色限制在區域內
+    dist = 0,                -- 離目標的水平距離
+    flySpeed = 30,           -- 飄行速度
+    hover = 4,               -- 飄行時離地高度
+    bv = nil,                -- 飄行用的 BodyVelocity
+    users = {},              -- 哪些功能正在用移動（撿花、翻機器人）
+    active = false,
 }
 local TOUCH_ID = 11
 local hasTouchApi = pcall(function()
@@ -158,6 +166,9 @@ function Move.effective()
     if Move.mode == "moveto" then
         return "moveto"
     end
+    if Move.mode == "fly" then
+        return "fly"
+    end
     if Move.mode == "touch" and hasTouchApi and stickGeometry() then
         return "touch"
     end
@@ -200,6 +211,7 @@ function Move.to(hum, root, pos, clamp)
         return
     end
     local off = flat(pos - root.Position)
+    Move.dist = off.Magnitude
     if off.Magnitude < 1 then
         Move.dir = nil
         return
@@ -232,6 +244,9 @@ end
 -- 放開搖桿（關閉腳本時用）
 function Move.release()
     Move.dir = nil
+    Move.users.petal, Move.users.flip = false, false
+    Move.active = false
+    Move.dropFly()
     if Move.touching then
         sendTouch(2, Move.lx, Move.ly)
         Move.touching = false
@@ -250,6 +265,64 @@ function Move.check()
     end
 end
 
+-- 哪個功能正在使用移動（都沒在用時，飄行會關掉）
+function Move.setUser(name, v)
+    Move.users[name] = v and true or false
+    Move.active = (Move.users.petal or Move.users.flip) and true or false
+end
+
+-- 飄行：用 BodyVelocity 讓角色飄在地面上方，水平方向朝目標移動
+local flyParams = RaycastParams.new()
+flyParams.FilterType = Enum.RaycastFilterType.Exclude
+
+function Move.dropFly()
+    if Move.bv then
+        Move.bv:Destroy()
+        Move.bv = nil
+    end
+end
+
+local function groundYAt(pos)
+    local ignore = {}
+    if LocalPlayer.Character then
+        table.insert(ignore, LocalPlayer.Character)
+    end
+    local petals = workspace:FindFirstChild("FlowerPetals")
+    if petals then
+        table.insert(ignore, petals)
+    end
+    flyParams.FilterDescendantsInstances = ignore
+    local hit = workspace:Raycast(pos + Vector3.new(0, 2, 0), Vector3.new(0, -300, 0), flyParams)
+    return hit and hit.Position.Y or nil
+end
+
+function Move.flyStep(d)
+    local root = getRoot()
+    if not (root and Move.active) then
+        Move.dropFly()
+        return
+    end
+    if not Move.bv or Move.bv.Parent ~= root then
+        Move.dropFly()
+        local bv = Instance.new("BodyVelocity")
+        bv.MaxForce = Vector3.new(1e9, 1e9, 1e9)
+        bv.Velocity = Vector3.zero
+        bv.Parent = root
+        Move.bv = bv
+    end
+    -- 垂直：維持在地面上方 hover 格；水平：朝目標移動，越靠近越慢
+    local gy = groundYAt(root.Position)
+    local vy = 0
+    if gy then
+        vy = math.clamp((gy + Move.hover - root.Position.Y) * 6, -40, 40)
+    end
+    local hv = Vector3.zero
+    if d then
+        hv = d * math.min(Move.flySpeed, math.max(Move.dist, 1) * 6)
+    end
+    Move.bv.Velocity = Vector3.new(hv.X, vy, hv.Z)
+end
+
 RunService.Heartbeat:Connect(function()
     local d = Move.dir
     local mode = Move.effective()
@@ -258,6 +331,12 @@ RunService.Heartbeat:Connect(function()
     if Move.touching and not (d and mode == "touch") then
         sendTouch(2, Move.lx, Move.ly)
         Move.touching = false
+    end
+    if mode == "fly" then
+        Move.flyStep(d)
+        return
+    else
+        Move.dropFly()
     end
     if not d or mode == "moveto" then
         return
@@ -395,6 +474,40 @@ regDropdown("moveMode", dMove, function() return Move.modeName end, function(v)
         Move.mode = MODE_LABELS[v]
         Move.modeName = v
     end
+end)
+
+local iFlySpeed = AfkTab:CreateInput({
+    Name = "飄行速度",
+    PlaceholderText = "預設 30（只有「飄」會用到）",
+    Callback = function(text)
+        local n = tonumber(text)
+        if n and n >= 5 and n <= 150 then
+            Move.flySpeed = n
+            notify("已設定", "飄行速度 = " .. n)
+        else
+            notify("輸入錯誤", "請輸入 5~150 的數字")
+        end
+    end,
+})
+regNumber("flySpeed", iFlySpeed, function() return Move.flySpeed end, function(v)
+    Move.flySpeed = v
+end)
+
+local iHover = AfkTab:CreateInput({
+    Name = "飄行高度（離地幾格）",
+    PlaceholderText = "預設 4，太高會撿不到花",
+    Callback = function(text)
+        local n = tonumber(text)
+        if n and n >= 1 and n <= 30 then
+            Move.hover = n
+            notify("已設定", "飄行高度 = " .. n)
+        else
+            notify("輸入錯誤", "請輸入 1~30 的數字")
+        end
+    end,
+})
+regNumber("hover", iHover, function() return Move.hover end, function(v)
+    Move.hover = v
 end)
 
 -- 掛機
@@ -821,6 +934,7 @@ do
         CurrentValue = false,
         Callback = function(v)
             petalOn = v
+            Move.setUser("petal", v)
             if v then
                 buildWalls()
                 Move.check()
@@ -829,7 +943,7 @@ do
                 Move.stop(getHumanoid(), getRoot())
             end
             -- 啟動時自動開穿透，讓角色能直接穿過物件走過去；關閉時只還原自己開的那次
-            if v and autoNoclipOn and not noclipOn then
+            if v and autoNoclipOn and Move.mode ~= "fly" and not noclipOn then
                 autoNoclip = true
                 pcall(function() tNoclip:Set(true) end)
             elseif not v and autoNoclip then
@@ -838,7 +952,7 @@ do
             end
         end,
     })
-    regToggle("autoPetal", tPetal, function() return petalOn end)
+    -- 不存檔：避免下次載入設定時一開腳本就自己開始撿花、亂跑
 
     local tAutoNoclip = AfkTab:CreateToggle({
         Name = "撿花時自動穿透",
@@ -1192,6 +1306,7 @@ do
                 return
             end
             flipOn = v
+            Move.setUser("flip", v)
             if v then
                 Move.check()
             else
