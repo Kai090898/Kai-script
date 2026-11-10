@@ -276,6 +276,7 @@ local flyParams = RaycastParams.new()
 flyParams.FilterType = Enum.RaycastFilterType.Exclude
 
 function Move.dropFly()
+    Move.gyF = nil
     if Move.bv then
         Move.bv:Destroy()
         Move.bv = nil
@@ -314,7 +315,13 @@ function Move.flyStep(d)
     local gy = groundYAt(root.Position)
     local vy = 0
     if gy then
-        vy = math.clamp((gy + Move.hover - root.Position.Y) * 6, -40, 40)
+        -- 地面高度做平滑，避免偵測到的地面忽高忽低，讓角色上下抖
+        Move.gyF = Move.gyF and (Move.gyF + (gy - Move.gyF) * 0.15) or gy
+        local err = (Move.gyF + Move.hover) - root.Position.Y
+        -- 差不到 0.5 格就不修正（死區），不然停下來時會一直上下晃
+        if math.abs(err) > 0.5 then
+            vy = math.clamp(err * 3, -25, 25)
+        end
     end
     local hv = Vector3.zero
     if d then
