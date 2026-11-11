@@ -940,6 +940,7 @@ local EN = {
     ["移動"] = "Movement",
     ["透視（ESP）"] = "ESP",
     ["傳送"] = "Teleport",
+    ["變身"] = "Morph",
     ["位置點"] = "Waypoints",
     ["其他"] = "Misc",
     ["掛機"] = "Farming",
@@ -1016,6 +1017,10 @@ local EN = {
     ["選擇玩家"] = "Select Player",
     ["重新整理玩家清單"] = "Refresh Player List",
     ["傳送到選擇的玩家"] = "Teleport to Selected Player",
+    ["選擇變身對象"] = "Morph Target",
+    ["重新整理變身玩家清單"] = "Refresh Morph Player List",
+    ["變成選擇的玩家外觀"] = "Morph Into Selected Player",
+    ["變成我的外觀"] = "Morph Back To Me",
     ["位置點名稱（可不填）"] = "Waypoint Name (optional)",
     ["例如 基地"] = "e.g. Base",
     ["儲存目前位置"] = "Save Current Position",
@@ -1534,6 +1539,105 @@ ModTab:CreateButton({
         else
             notify("傳送失敗", "找不到該玩家，請先選擇玩家")
         end
+    end,
+})
+
+-- 變身（只有自己看得到）
+ModTab:CreateSection("變身")
+
+local morphTarget = nil
+local morphBusy = false
+
+local MorphDropdown = ModTab:CreateDropdown({
+    Name = "選擇變身對象",
+    Options = playerNames(),
+    CurrentOption = {},
+    Callback = function(opt)
+        morphTarget = type(opt) == "table" and opt[1] or opt
+    end,
+})
+
+local function refreshMorphPlayers()
+    pcall(function()
+        MorphDropdown:Refresh(playerNames())
+    end)
+end
+Players.PlayerAdded:Connect(refreshMorphPlayers)
+Players.PlayerRemoving:Connect(function()
+    task.defer(refreshMorphPlayers)
+end)
+
+-- 取得某個 UserId 的外觀並套用到自己身上
+local function applyAppearance(userId)
+    local hum = getHumanoid()
+    if not hum then
+        return false, "找不到角色"
+    end
+    local ok, desc = pcall(function()
+        return Players:GetHumanoidDescriptionFromUserId(userId)
+    end)
+    if not ok or not desc then
+        return false, "取得外觀失敗"
+    end
+    local ok2, err = pcall(function()
+        hum:ApplyDescription(desc)
+    end)
+    if not ok2 then
+        return false, tostring(err)
+    end
+    return true
+end
+
+ModTab:CreateButton({
+    Name = "重新整理變身玩家清單",
+    Callback = function()
+        refreshMorphPlayers()
+        notify("已更新", "變身玩家清單已重新整理", 2)
+    end,
+})
+
+ModTab:CreateButton({
+    Name = "變成選擇的玩家外觀",
+    Callback = function()
+        if morphBusy then
+            return
+        end
+        local target = morphTarget and Players:FindFirstChild(morphTarget)
+        if not target then
+            notify("變身失敗", "請先選擇玩家（或對方已離開）")
+            return
+        end
+        morphBusy = true
+        task.spawn(function()
+            -- 先還原成自己的外觀（重置），再套用對方外觀，避免外觀疊在一起
+            applyAppearance(LocalPlayer.UserId)
+            local ok, err = applyAppearance(target.UserId)
+            morphBusy = false
+            if ok then
+                notify("變身成功", "已變成 " .. target.DisplayName, 3)
+            else
+                notify("變身失敗", tostring(err), 4)
+            end
+        end)
+    end,
+})
+
+ModTab:CreateButton({
+    Name = "變成我的外觀",
+    Callback = function()
+        if morphBusy then
+            return
+        end
+        morphBusy = true
+        task.spawn(function()
+            local ok, err = applyAppearance(LocalPlayer.UserId)
+            morphBusy = false
+            if ok then
+                notify("已還原", "已變回你自己的外觀", 3)
+            else
+                notify("還原失敗", tostring(err), 4)
+            end
+        end)
     end,
 })
 
