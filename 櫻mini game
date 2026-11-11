@@ -1361,6 +1361,305 @@ do
         flipOn = false
     end)
 end
+-- ====================================================================
+--  每日小農場自動化（貼進「櫻mini game」，放在「-- ===== 設定 =====」那一段的前面）
+--  做法：直接觸發農場畫面上的按鈕，不需要知道 FarmEvent 的參數
+--  不會按任何 Robux 解鎖或解鎖田地的按鈕
+-- ====================================================================
+AfkTab:CreateSection("每日小農場")
+
+do
+    local VIM = game:GetService("VirtualInputManager")
+    local GuiService = game:GetService("GuiService")
+
+    local SEEDS = {"青菜", "蘿蔔", "番茄", "玉米", "向日葵"}
+
+    local farmOn = false
+    local harvestOn, plantOn, waterOn, pestOn, sunOn = true, false, true, true, true
+    local closeAfter = true      -- 操作完，如果是腳本自己打開的畫面就關回去
+    local seedName = "玉米"
+    local farmInterval = 60      -- 每隔幾秒檢查一次
+    local status = "--"
+
+    local function getPg()
+        return LocalPlayer:FindFirstChild("PlayerGui")
+    end
+
+    -- 在介面裡找文字符合條件的 TextButton（只比對按鈕，不會碰到文字標籤）
+    local function findButton(root, pred)
+        for _, v in ipairs(root:GetDescendants()) do
+            if v:IsA("TextButton") and pred(v.Text) then
+                return v
+            end
+        end
+    end
+
+    local function has(text, s)
+        return text:find(s, 1, true) ~= nil
+    end
+
+    -- 按下按鈕：優先觸發按鈕本身的點擊事件，不行再模擬點中心
+    local function press(btn)
+        if getconnections then
+            for _, sig in ipairs({btn.Activated, btn.MouseButton1Click}) do
+                local ok, conns = pcall(getconnections, sig)
+                if ok and conns and #conns > 0 then
+                    for _, c in ipairs(conns) do
+                        pcall(function() c:Fire() end)
+                    end
+                    return true
+                end
+            end
+        end
+        local gui = btn:FindFirstAncestorWhichIsA("ScreenGui")
+        local inset = Vector2.new(0, 0)
+        if gui and not gui.IgnoreGuiInset then
+            inset = GuiService:GetGuiInset()
+        end
+        local pos = btn.AbsolutePosition + btn.AbsoluteSize / 2 + inset
+        return pcall(function()
+            VIM:SendMouseButtonEvent(pos.X, pos.Y, 0, true, game, 0)
+            VIM:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 0)
+        end)
+    end
+
+    -- 讀出所有田的狀態（顯示用）
+    local function summary(gui)
+        local grow, empty, locked = 0, 0, 0
+        local scroll = gui:FindFirstChildWhichIsA("ScrollingFrame", true)
+        if not scroll then
+            return "找不到田"
+        end
+        for _, plot in ipairs(scroll:GetChildren()) do
+            if plot:IsA("TextButton") then
+                local hasTimer, isLocked = false, false
+                for _, l in ipairs(plot:GetChildren()) do
+                    if l:IsA("TextLabel") then
+                        if has(l.Text, "⏳") then hasTimer = true end
+                        if has(l.Text, "🔒") then isLocked = true end
+                    end
+                end
+                if isLocked then
+                    locked += 1
+                elseif hasTimer then
+                    grow += 1
+                else
+                    empty += 1
+                end
+            end
+        end
+        return string.format("生長中 %d｜其他 %d｜未解鎖 %d", grow, empty, locked)
+    end
+
+    local function cycle()
+        local pg = getPg()
+        local gui = pg and pg:FindFirstChild("FarmGui")
+        local main = gui and gui:FindFirstChildOfClass("Frame")
+        if not main then
+            status = "找不到 FarmGui"
+            return
+        end
+
+        -- 農場畫面沒打開就先按 FarmHud 的「農場」按鈕打開
+        local openedByMe = false
+        if not main.Visible then
+            local hud = pg:FindFirstChild("FarmHud")
+            local openBtn = hud and hud:FindFirstChild("OpenFarm")
+            if not openBtn then
+                status = "找不到農場按鈕 OpenFarm"
+                return
+            end
+            press(openBtn)
+            local t0 = tick()
+            while tick() - t0 < 3 and not main.Visible do
+                task.wait(0.1)
+            end
+            if not main.Visible then
+                status = "農場畫面打不開"
+                return
+            end
+            openedByMe = true
+            task.wait(0.5)
+        end
+
+        local did = {}
+
+        -- 有蟲就除蟲（要花 30🌸，但不除會虧更多）
+        if pestOn then
+            local b = findButton(gui, function(t) return has(t, "🐛") and not has(t, "沒蟲") end)
+            if b then
+                press(b)
+                table.insert(did, "除蟲")
+                task.wait(0.4)
+            end
+        end
+
+        -- 每日日照（今日已用的就跳過）
+        if sunOn then
+            local b = findButton(gui, function(t) return has(t, "☀") and not has(t, "已用") end)
+            if b then
+                press(b)
+                table.insert(did, "日照")
+                task.wait(0.4)
+            end
+        end
+
+        -- 全部收成（遊戲只會收成熟的）
+        if harvestOn then
+            local b = findButton(gui, function(t) return has(t, "全部收成") end)
+            if b then
+                press(b)
+                table.insert(did, "收成")
+                task.wait(0.5)
+            end
+        end
+
+        -- 重新種植：先選種子，再按全部種植（會花🌸買種子）
+        if plantOn then
+            local seed = findButton(gui, function(t) return has(t, seedName) and has(t, "🌸") end)
+            local plantBtn = findButton(gui, function(t) return has(t, "全部種植") end)
+            if seed and plantBtn then
+                press(seed)
+                task.wait(0.4)
+                press(plantBtn)
+                table.insert(did, "種植" .. seedName)
+                task.wait(0.5)
+            end
+        end
+
+        -- 全部澆水
+        if waterOn then
+            local b = findButton(gui, function(t) return has(t, "全部澆水") end)
+            if b then
+                press(b)
+                table.insert(did, "澆水")
+                task.wait(0.4)
+            end
+        end
+
+        status = summary(gui) .. "｜" .. (#did > 0 and table.concat(did, "、") or "沒有動作")
+
+        -- 只關回自己打開的畫面（用 X 按鈕）
+        if openedByMe and closeAfter then
+            local x = findButton(gui, function(t) return t == "X" end)
+            if x then
+                press(x)
+            end
+        end
+    end
+
+    task.spawn(function()
+        while true do
+            if farmOn then
+                local ok, err = pcall(cycle)
+                if not ok then
+                    status = "錯誤：" .. tostring(err)
+                    warn("[卡依腳本] 小農場錯誤：" .. tostring(err))
+                end
+                local waited = 0
+                while farmOn and waited < farmInterval do
+                    task.wait(0.5)
+                    waited += 0.5
+                end
+            else
+                task.wait(0.5)
+            end
+        end
+    end)
+
+    AfkTab:CreateToggle({
+        Name = "自動小農場",
+        CurrentValue = false,
+        Callback = function(v)
+            farmOn = v
+            if v then
+                status = "啟動中…"
+            end
+        end,
+    })
+    -- 不存檔：避免下次載入設定時一啟動就自己開始花🌸
+
+    AfkTab:CreateToggle({
+        Name = "自動收成", CurrentValue = true,
+        Callback = function(v) harvestOn = v end,
+    })
+    AfkTab:CreateToggle({
+        Name = "自動重新種植（會花🌸）", CurrentValue = false,
+        Callback = function(v) plantOn = v end,
+    })
+
+    local dSeed = AfkTab:CreateDropdown({
+        Name = "種植的種子",
+        Options = SEEDS,
+        CurrentOption = {seedName},
+        Callback = function(opt)
+            local s = type(opt) == "table" and opt[1] or opt
+            for _, n in ipairs(SEEDS) do
+                if n == s then
+                    seedName = s
+                end
+            end
+        end,
+    })
+    regDropdown("farmSeed", dSeed, function() return seedName end, function(v)
+        seedName = v
+    end)
+
+    AfkTab:CreateToggle({
+        Name = "自動澆水", CurrentValue = true,
+        Callback = function(v) waterOn = v end,
+    })
+    AfkTab:CreateToggle({
+        Name = "自動除蟲（每次 30🌸）", CurrentValue = true,
+        Callback = function(v) pestOn = v end,
+    })
+    AfkTab:CreateToggle({
+        Name = "自動每日日照", CurrentValue = true,
+        Callback = function(v) sunOn = v end,
+    })
+    AfkTab:CreateToggle({
+        Name = "操作完把農場畫面關回去", CurrentValue = true,
+        Callback = function(v) closeAfter = v end,
+    })
+
+    local iFarmInterval = AfkTab:CreateInput({
+        Name = "農場檢查間隔（秒）",
+        PlaceholderText = "預設 60",
+        Callback = function(text)
+            local n = tonumber(text)
+            if n and n >= 5 then
+                farmInterval = n
+                notify("已設定", "每 " .. n .. " 秒檢查一次農場")
+            else
+                notify("輸入錯誤", "請輸入 5 以上的數字")
+            end
+        end,
+    })
+    regNumber("farmInterval", iFarmInterval, function() return farmInterval end, function(v)
+        farmInterval = v
+    end)
+
+    -- 顯示目前狀態（點一下可以複製）
+    local statusBtn = AfkTab:CreateButton({
+        Name = "農場狀態  --",
+        Callback = function()
+            if setclipboard then
+                pcall(setclipboard, status)
+            end
+            notify("農場狀態", status, 4)
+        end,
+    })
+    task.spawn(function()
+        while true do
+            statusBtn:SetName("農場狀態  " .. status)
+            task.wait(0.5)
+        end
+    end)
+
+    UI:OnClose(function()
+        farmOn = false
+    end)
+end
 
 -- ===== 設定 =====
 AfkTab:CreateSection("設定")
