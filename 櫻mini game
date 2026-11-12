@@ -2122,6 +2122,708 @@ do
         conn:Disconnect()
     end)
 end
+-- ====================================================================
+--  熔岩攀爬 自動攀爬 第一版（貼進「櫻mini game」，放在釣魚那一段的後面、
+--  「-- ===== 設定 =====」的前面）
+--
+--  做法：讀取賽道上每個平台、鋸刃的即時位置，一個平台一個平台往上跳
+--  - 已測量：角色 18×24、走路 75px/s、最高跳 72px、蓄力 0.4 秒左右蓄滿
+--  - 還沒測到的（腳本會邊跳邊學）：跳躍時往左右飄多遠、空中能不能轉向、
+--    平台是不是實心（會不會撞頭）
+--  - 平台落差超過最大跳躍高度時，腳本會停下來並回報卡在哪
+--  - 控制方式預設用鍵盤（A / D / 空白鍵），不用你的手指
+-- ====================================================================
+AfkTab:CreateSection("熔岩攀爬")
+
+do
+    local VIM = game:GetService("VirtualInputManager")
+    local RunService = game:GetService("RunService")
+    local GuiService = game:GetService("GuiService")
+
+    -- ===== 從探測紀錄量到的物理常數 =====
+    local PW, PH = 18, 24             -- 角色寬高
+    local G_UP, G_DOWN = 1200, 1050   -- 上升 / 下降重力 px/s²
+    local SAW_MIN, SAW_MAX = 0, 464   -- 鋸刃來回範圍
+
+    local climbOn = false
+    local method = "鍵盤"
+    local autoRetry = true
+    local status = "--"
+    local logBuf = {}
+    local runStart = tick()
+    local toggleHandle
+
+    local lvl                          -- 目前賽道
+    local ps = {x = 0, feet = 0, h = PH, still = 0, vx = 0, vy = 0}
+    local ended = false
+    local keyDown = {}
+
+    -- 邊跳邊學的參數
+    local vxAir = 110                  -- 跳躍時的水平速度（px/s）
+    local rcorr = 1.0                  -- 實際跳躍高度 / 預期高度
+    local airLocked = nil              -- true=起跳後方向被鎖定；false=空中可轉向
+    local solidMode = false            -- 平台疑似實心（撞頭）時改從側邊起跳
+
+    local function has(t, s)
+        return t ~= nil and t:find(s, 1, true) ~= nil
+    end
+    local function valid(o)
+        return o ~= nil and o.Parent ~= nil
+    end
+    local function shown(obj)
+        local cur = obj
+        while cur do
+            if cur:IsA("GuiObject") and not cur.Visible then return false end
+            if cur:IsA("ScreenGui") then return cur.Enabled end
+            cur = cur.Parent
+        end
+        return false
+    end
+    local function blog(s)
+        table.insert(logBuf, string.format("[%.1f] %s", tick() - runStart, s))
+        if #logBuf > 500 then table.remove(logBuf, 1) end
+    end
+    local function getGui()
+        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+        return pg and pg:FindFirstChild("LavaJumpGui")
+    end
+
+    -- ===== 輸入 =====
+    local KEYS = {L = Enum.KeyCode.A, R = Enum.KeyCode.D, UP = Enum.KeyCode.Space}
+    local SYM = {L = "◀", R = "▶", UP = "▲"}
+
+    local function center(btn)
+        local g = btn:FindFirstAncestorWhichIsA("ScreenGui")
+        local inset = Vector2.new(0, 0)
+        if g and not g.IgnoreGuiInset then
+            inset = GuiService:GetGuiInset()
+        end
+        return btn.AbsolutePosition + btn.AbsoluteSize / 2 + inset
+    end
+
+    local function click(btn)
+        if getconnections then
+            for _, sig in ipairs({btn.Activated, btn.MouseButton1Click}) do
+                local ok, conns = pcall(getconnections, sig)
+                if ok and conns and #conns > 0 then
+                    for _, c in ipairs(conns) do
+                        pcall(function() c:Fire() end)
+                    end
+                    return
+                end
+            end
+        end
+        local p = center(btn)
+        VIM:SendMouseButtonEvent(p.X, p.Y, 0, true, game, 0)
+        VIM:SendMouseButtonEvent(p.X, p.Y, 0, false, game, 0)
+    end
+
+    local function findSymBtn(name)
+        local g = getGui()
+        if not g then return end
+        for _, v in ipairs(g:GetDescendants()) do
+            if v:IsA("TextButton") and v.Text == SYM[name] then
+                return v
+            end
+        end
+    end
+
+    local function setKey(name, down)
+        if keyDown[name] == down then
+            return
+        end
+        keyDown[name] = down
+        if method == "鍵盤" then
+            VIM:SendKeyEvent(down, KEYS[name], false, game)
+        else
+            local b = findSymBtn(name)
+            if b then
+                local p = center(b)
+                VIM:SendMouseButtonEvent(p.X, p.Y, 0, down, game, 0)
+            end
+        end
+    end
+    local function releaseAll()
+        setKey("L", false)
+        setKey("R", false)
+        setKey("UP", false)
+    end
+
+    -- ===== 找遊戲物件 =====
+    local function failShown(g)
+        for _, d in ipairs(g:GetDescendants()) do
+            if d:IsA("TextLabel") and has(d.Text, "挑戰失敗") and shown(d) then
+                return true
+            end
+        end
+        return false
+    end
+
+    local function locate()
+        local g = getGui()
+        if not g then return end
+        local giveUp
+        for _, v in ipairs(g:GetDescendants()) do
+            if v:IsA("TextButton") and v.Text == "放棄" then
+                giveUp = v
+                break
+            end
+        end
+        if not giveUp or not shown(giveUp) then return end
+        local vw = giveUp.Parent
+        for _, d in ipairs(vw:GetChildren()) do
+            if d:IsA("TextLabel") and has(d.Text, "生成今日賽道") and shown(d) then
+                return
+            end
+        end
+        if failShown(g) then return end
+        local w, best = nil, -1
+        for _, c in ipairs(vw:GetChildren()) do
+            if c:IsA("GuiObject") then
+                local n = #c:GetDescendants()
+                if n > best then w, best = c, n end
+            end
+        end
+        if not w or best < 100 then return end
+        local pl, lv
+        for _, c in ipairs(w:GetChildren()) do
+            if c:IsA("Frame") then
+                if c.Size.X.Offset == PW and c.Size.Y.Offset == PH then pl = c end
+                if c.Size.Y.Offset == 3000 then lv = c end
+            end
+        end
+        if pl and lv then
+            return vw, w, pl, lv, giveUp
+        end
+    end
+
+    local function buildLevel(world, player, lava)
+        local plats, saws = {}, {}
+        for _, c in ipairs(world:GetChildren()) do
+            if c:IsA("Frame") and c ~= player and c ~= lava then
+                local sx, sy = c.Size.X.Offset, c.Size.Y.Offset
+                local lbl = c:FindFirstChildWhichIsA("TextLabel", true)
+                local txt = lbl and lbl.Text or ""
+                if sy == 12 and sx >= 40 and sx <= 140 then
+                    local P = {fr = c, w = sx, top = c.Position.Y.Offset, txt = txt, lastX = c.Position.X.Offset, v = 0}
+                    if has(txt, "⇄") then P.kind = "move"
+                    elseif has(txt, "▲") then P.kind = "spike"; P.lbl = lbl
+                    elseif has(txt, "🚩") then P.kind = "goal"
+                    elseif has(txt, "┈") then P.kind = "crumble"
+                    else P.kind = "normal" end
+                    table.insert(plats, P)
+                elseif sx == 16 and sy == 16 and has(txt, "✱") then
+                    table.insert(saws, {fr = c, y = c.Position.Y.Offset, lastX = c.Position.X.Offset, v = 0})
+                elseif sx == 480 and sy == 600 then
+                    table.insert(plats, {fr = c, w = 480, top = c.Position.Y.Offset, txt = "", kind = "ground", lastX = 0, v = 0})
+                end
+            end
+        end
+        table.sort(plats, function(a, b) return a.top > b.top end)   -- 由低到高
+        return plats, saws
+    end
+
+    local function platX(P)
+        return P.fr.Position.X.Offset
+    end
+
+    -- ===== 每幀更新角色 / 鋸刃 / 移動平台速度 =====
+    local lastBeat, checkT = tick(), 0
+    local conn = RunService.Heartbeat:Connect(function()
+        local now = tick()
+        local dt = math.max(now - lastBeat, 1e-3)
+        lastBeat = now
+        if not lvl or not valid(lvl.player) then
+            return
+        end
+        local pl = lvl.player
+        local x = pl.Position.X.Offset
+        local h = pl.Size.Y.Offset
+        local feet = pl.Position.Y.Offset + h
+        if math.abs(feet - ps.feet) < 0.6 then ps.still += 1 else ps.still = 0 end
+        ps.vy = (feet - ps.feet) / dt
+        ps.vx = (x - ps.x) / dt
+        ps.x, ps.feet, ps.h = x, feet, h
+
+        for _, s in ipairs(lvl.saws) do
+            local sx = s.fr.Position.X.Offset
+            s.v = s.v * 0.8 + ((sx - s.lastX) / dt) * 0.2
+            s.lastX = sx
+        end
+        for _, P in ipairs(lvl.plats) do
+            if P.kind == "move" then
+                local px = P.fr.Position.X.Offset
+                P.v = P.v * 0.8 + ((px - P.lastX) / dt) * 0.2
+                P.lastX = px
+            end
+        end
+
+        checkT += dt
+        if checkT > 0.25 then
+            checkT = 0
+            local g = getGui()
+            if not g or not shown(lvl.giveUp) or failShown(g) then
+                ended = true
+            end
+        end
+    end)
+
+    local function platformUnder()
+        local best
+        for _, P in ipairs(lvl.plats) do
+            if math.abs(ps.feet - P.top) <= 2.5 then
+                local px = platX(P)
+                if ps.x + PW > px + 1 and ps.x < px + P.w - 1 then
+                    if not best or P.top < best.top then best = P end
+                end
+            end
+        end
+        return best
+    end
+    local function grounded()
+        return ps.still >= 3 and platformUnder() ~= nil
+    end
+    local function waitGrounded(timeout)
+        local t = tick()
+        while climbOn and not ended and tick() - t < timeout do
+            if grounded() then
+                return platformUnder()
+            end
+            RunService.Heartbeat:Wait()
+        end
+    end
+
+    -- ===== 規劃 =====
+    -- 玩家左緣 x 的安全範圍（完全站在平台上，並避開尖刺）
+    local function safeRanges(P, shift)
+        local x0 = platX(P) + (shift or 0)
+        local lo, hi = x0 + 2, x0 + P.w - PW - 2
+        if hi < lo then
+            lo = x0 + P.w / 2 - PW / 2
+            hi = lo
+        end
+        local list = {{lo, hi}}
+        if P.kind == "spike" and valid(P.lbl) then
+            local sc = lvl.scale
+            local relL = (P.lbl.AbsolutePosition.X - P.fr.AbsolutePosition.X) / sc
+            local sw = P.lbl.AbsoluteSize.X / sc
+            local zl, zh = x0 + relL - PW + 2, x0 + relL + sw - 2
+            local out = {}
+            for _, r in ipairs(list) do
+                if zh < r[1] or zl > r[2] then
+                    table.insert(out, r)
+                else
+                    if zl - 1 >= r[1] then table.insert(out, {r[1], zl - 1}) end
+                    if zh + 1 <= r[2] then table.insert(out, {zh + 1, r[2]}) end
+                end
+            end
+            if #out > 0 then list = out end
+        end
+        return list
+    end
+
+    local function chooseRoute(A, B, shiftB, variant)
+        local AS, BS = safeRanges(A, 0), safeRanges(B, shiftB)
+        local best
+        for _, a in ipairs(AS) do
+            for _, b in ipairs(BS) do
+                local cand
+                local lo, hi = math.max(a[1], b[1]), math.min(a[2], b[2])
+                if lo <= hi then
+                    -- 水平有重疊：原地垂直跳（疑似實心平台時改從側邊）
+                    local xl = math.clamp(ps.x, lo, hi)
+                    if variant == 2 then
+                        xl = math.clamp((b[1] + b[2]) / 2, lo, hi)
+                    end
+                    cand = {xl = xl, xt = xl, dir = 0, travel = 0, a = a}
+                    if solidMode then
+                        local right, left = b[2] + 22, b[1] - 22
+                        if right <= a[2] then
+                            cand = {xl = right, xt = math.max(b[2] - 3, b[1]), dir = -1, a = a}
+                        elseif left >= a[1] then
+                            cand = {xl = left, xt = math.min(b[1] + 3, b[2]), dir = 1, a = a}
+                        end
+                        cand.travel = math.abs(cand.xt - cand.xl)
+                    end
+                elseif b[1] > a[2] then
+                    local xt = math.min(b[1] + 3, b[2])
+                    cand = {xl = a[2], xt = xt, dir = 1, travel = xt - a[2], a = a}
+                else
+                    local xt = math.max(b[2] - 3, b[1])
+                    cand = {xl = a[1], xt = xt, dir = -1, travel = a[1] - xt, a = a}
+                end
+                cand.cost = cand.travel * 3 + math.abs(ps.x - cand.xl) * 0.05
+                if not best or cand.cost < best.cost then
+                    best = cand
+                end
+            end
+        end
+        return best
+    end
+
+    local function riseBase(c)
+        return math.clamp(45 + 135 * (c - 0.17), 20, 72)
+    end
+    local function chargeFor(R)
+        local need = math.min(R / rcorr, 72)
+        if need >= 71 then
+            return 0.42
+        end
+        return math.clamp(0.17 + (need - 45) / 135, 0.03, 0.42)
+    end
+    local function flightTime(H, apex)
+        local v0 = math.sqrt(2 * G_UP * apex)
+        return v0 / G_UP + math.sqrt(2 * math.max(apex - H, 1) / G_DOWN)
+    end
+
+    local function sawX(s, t)
+        local span = SAW_MAX - SAW_MIN
+        local rel = (s.lastX + s.v * t - SAW_MIN) % (2 * span)
+        if rel > span then rel = 2 * span - rel end
+        return SAW_MIN + rel
+    end
+
+    -- 預測這次跳躍會不會撞到鋸刃
+    local function sawConflict(xl, xt, feet0, apex, T, c)
+        local v0 = math.sqrt(2 * G_UP * apex)
+        local tUp = v0 / G_UP
+        local total = c + T + 0.15
+        for t = 0, total, 0.05 do
+            local rise, px = 0, xl
+            if t > c then
+                local tt = t - c
+                if tt <= tUp then
+                    rise = v0 * tt - 0.5 * G_UP * tt * tt
+                else
+                    rise = apex - 0.5 * G_DOWN * (tt - tUp) ^ 2
+                end
+                px = xl + (xt - xl) * math.min(1, tt / math.max(T, 0.1))
+            end
+            local f = feet0 - rise
+            for _, s in ipairs(lvl.saws) do
+                if f + 3 > s.y and f - PH - 3 < s.y + 16 then
+                    local sx = sawX(s, t)
+                    if sx + 16 + 8 > px and sx - 8 < px + PW then
+                        return true
+                    end
+                end
+            end
+        end
+        return false
+    end
+
+    local function walkTo(A, ofs)
+        local t = tick()
+        while climbOn and not ended and tick() - t < 6 do
+            local dx = platX(A) + ofs - ps.x
+            if math.abs(dx) <= 2 then break end
+            setKey(dx > 0 and "L" or "R", false)
+            setKey(dx > 0 and "R" or "L", true)
+            RunService.Heartbeat:Wait()
+        end
+        setKey("L", false)
+        setKey("R", false)
+        local t2 = tick()
+        while ps.still < 3 and tick() - t2 < 0.5 do
+            RunService.Heartbeat:Wait()
+        end
+    end
+
+    local function lavaGap()
+        return valid(lvl.lava) and (lvl.lava.Position.Y.Offset - ps.feet) or 0
+    end
+    local function setStatus(prefix, idx)
+        status = string.format("%s｜平台 %d/%d｜高 %d m｜岩漿距腳 %d｜vx=%.0f 高度係數=%.2f %s",
+            prefix, idx or 0, #lvl.plats, math.floor(-ps.feet / 10), lavaGap(), vxAir, rcorr,
+            airLocked == nil and "" or (airLocked and "（方向鎖定）" or "（可空中轉向）"))
+    end
+
+    -- ===== 一次跳躍 =====
+    local function doJump(A, B, route, c, apex, T, H, idx)
+        local feet0 = ps.feet
+        local dirKey = route.dir > 0 and "R" or "L"
+        local tStart = tick()
+        local takeoff, minFeet = nil, feet0
+        local dirOn, upReleased, dirReleased = false, false, false
+        local xRel, sumV, nV = nil, 0, 0
+        setKey("UP", true)
+        while climbOn and not ended do
+            RunService.Heartbeat:Wait()
+            local el = tick() - tStart
+            if route.dir ~= 0 and not dirOn and el >= c - 0.05 then
+                setKey(dirKey, true)
+                dirOn = true
+            end
+            if not upReleased and el >= c then
+                setKey("UP", false)
+                upReleased = true
+            end
+            if not takeoff and ps.feet < feet0 - 1.5 then
+                takeoff = tick()
+            end
+            if ps.feet < minFeet then minFeet = ps.feet end
+            if takeoff then
+                local ta = tick() - takeoff
+                if dirOn and ta > 0.05 and ta < 0.22 then
+                    sumV += ps.vx * route.dir
+                    nV += 1
+                end
+                if dirOn and not dirReleased then
+                    local reached = (route.dir > 0 and ps.x >= route.xt) or (route.dir < 0 and ps.x <= route.xt)
+                    if reached then
+                        setKey(dirKey, false)
+                        dirReleased = true
+                        xRel = ps.x
+                    end
+                end
+                if ta > 0.3 and ps.still >= 4 and platformUnder() then
+                    break
+                end
+            end
+            if el > 4 then break end
+        end
+        releaseAll()
+        local landed = waitGrounded(4)
+        local apexM = feet0 - minFeet
+        local airT = takeoff and (tick() - takeoff) or 0
+
+        -- 學習
+        if takeoff then
+            if dirReleased and xRel then
+                local cont = (ps.x - xRel) * route.dir
+                if cont > 6 then airLocked = true elseif cont < 3 then airLocked = false end
+            end
+            if nV >= 4 then
+                local vm = sumV / nV
+                if vm > 20 then vxAir = 0.5 * vxAir + 0.5 * vm end
+            end
+            if apexM >= apex - 8 then
+                rcorr = math.clamp(0.6 * rcorr + 0.4 * (apexM / riseBase(c)), 0.85, 1.15)
+            elseif route.travel == 0 and H < 66 then
+                solidMode = true
+                blog("疑似撞頭（上升 " .. apexM .. " < 預期 " .. math.floor(apex) .. "），改從側邊起跳")
+            end
+        end
+        blog(string.format("#%d→#%d H=%d 蓄力%.2f 預期上升%d 實際%d 移動%d 方向%d 滯空%.2f 落在=%s",
+            idx, idx + 1, H, c, apex, apexM, route.travel, route.dir, airT,
+            landed and (landed == B and "目標" or ("平台高度" .. -landed.top)) or "未著地"))
+        return takeoff ~= nil, landed
+    end
+
+    -- ===== 主迴圈 =====
+    local function indexOf(A)
+        for i, P in ipairs(lvl.plats) do
+            if P == A then return i end
+        end
+        return 0
+    end
+
+    local function climb()
+        local fails, nojump = {}, 0
+        while climbOn and not ended do
+            local A = waitGrounded(6)
+            if not A then
+                setStatus("等著地")
+                continue
+            end
+            if A.kind == "goal" then
+                return "goal"
+            end
+            local idx = indexOf(A)
+            local B = lvl.plats[idx + 1]
+            if not B then
+                return "goal"
+            end
+            local variant = fails[B] or 0
+            if variant >= 6 then
+                return "stuck", string.format("卡在第 %d→%d 個平台（高度差 %d、水平差約 %d）；最大跳躍約 72px，水平速度約 %.0f px/s。請把狀態按鈕的紀錄貼給我",
+                    idx, idx + 1, A.top - B.top, math.abs(platX(B) - platX(A)), vxAir)
+            end
+            local H = A.top - B.top
+            local R = H + 7 + (variant == 1 and 6 or 0)
+            local c = chargeFor(R)
+            local apex = riseBase(c) * rcorr
+            if H > 70 then
+                blog(string.format("警告：第 %d→%d 個平台高度差 %d 超過最大跳躍 72", idx, idx + 1, H))
+            end
+            local T = flightTime(math.min(H, apex - 1), apex)
+            local lead = (B.kind == "move") and (c + T) or 0
+            local route = chooseRoute(A, B, B.v * lead, variant)
+            if not route then
+                return "stuck", "找不到可站的位置"
+            end
+            -- 方向被鎖定時，依水平速度把起跳點往後退，讓落點剛好在目標上
+            if route.travel > 0 and airLocked == true then
+                local reach = vxAir * T
+                route.xl = math.clamp(route.xt - route.dir * reach, route.a[1], route.a[2])
+                route.travel = math.abs(route.xt - route.xl)
+            end
+
+            setStatus("走到起跳點", idx)
+            walkTo(A, route.xl - platX(A))
+
+            -- 等鋸刃的空檔
+            local waited = tick()
+            while climbOn and not ended do
+                local hit = sawConflict(ps.x, route.xt, ps.feet, apex, T, c)
+                if not hit or tick() - waited > 8 then break end
+                setStatus("等鋸刃空檔", idx)
+                RunService.Heartbeat:Wait()
+            end
+            if not climbOn or ended then break end
+
+            setStatus("跳躍", idx)
+            local didJump, landed = doJump(A, B, route, c, apex, T, H, idx)
+            if not didJump then
+                nojump += 1
+                if nojump >= 3 then
+                    return "stuck", "連續 3 次按了跳躍都沒有跳起來，請把操作方式換成另一種再試"
+                end
+            else
+                nojump = 0
+                if landed ~= B and not (landed and landed.top < A.top) then
+                    fails[B] = (fails[B] or 0) + 1
+                    if fails[B] == 3 then solidMode = not solidMode end
+                end
+            end
+            task.wait(0.05)
+        end
+        return "ended"
+    end
+
+    -- ===== 自動導覽（結算畫面 → 回到選單 → 再次挑戰）=====
+    local lastNav = 0
+    local function autoNavigate()
+        if tick() - lastNav < 1.5 then return end
+        local g = getGui()
+        if not g then return end
+        for _, v in ipairs(g:GetDescendants()) do
+            if v:IsA("TextButton") and shown(v) then
+                local t = v.Text
+                if has(t, "回到選單") or has(t, "再次挑戰") or has(t, "開始挑戰") then
+                    lastNav = tick()
+                    click(v)
+                    return
+                end
+            end
+        end
+    end
+
+    local function stopSelf(msg)
+        climbOn = false
+        releaseAll()
+        status = msg
+        blog("停止：" .. msg)
+        if notify then
+            notify("自動攀爬", msg, 6)
+        end
+        local text = table.concat(logBuf, "\n")
+        if setclipboard then pcall(setclipboard, text) end
+        if writefile then pcall(writefile, "KaiLavaClimb.txt", text) end
+        if toggleHandle then
+            pcall(function() toggleHandle:Set(false) end)
+        end
+    end
+
+    local function runner()
+        local tries = 0
+        while climbOn do
+            status = "等待遊戲開始…"
+            local vw, world, player, lava, giveUp
+            while climbOn do
+                vw, world, player, lava, giveUp = locate()
+                if player then break end
+                if autoRetry then autoNavigate() end
+                task.wait(0.3)
+            end
+            if not climbOn then break end
+
+            ended = false
+            local plats, saws = buildLevel(world, player, lava)
+            lvl = {plats = plats, saws = saws, player = player, lava = lava, world = world, giveUp = giveUp,
+                   scale = world.AbsoluteSize.X / math.max(world.Size.X.Offset, 1)}
+            ps.feet = player.Position.Y.Offset + player.Size.Y.Offset
+            ps.still = 0
+            blog(string.format("開始：%d 個平台、%d 個鋸刃", #plats, #saws))
+            task.wait(0.5)
+
+            local res, msg = climb()
+            releaseAll()
+            if res == "goal" then
+                stopSelf("到達山頂！")
+                break
+            elseif res == "stuck" then
+                stopSelf(msg)
+                break
+            end
+            tries += 1
+            blog("這一輪結束，已重試 " .. tries .. " 次")
+            if not autoRetry or tries >= 5 then
+                stopSelf("已達重試上限或關閉自動重試")
+                break
+            end
+        end
+    end
+
+    -- ===== 介面 =====
+    toggleHandle = AfkTab:CreateToggle({
+        Name = "自動攀爬（熔岩攀爬）",
+        CurrentValue = false,
+        Callback = function(v)
+            climbOn = v
+            if v then
+                runStart = tick()
+                logBuf = {}
+                task.spawn(runner)
+            else
+                releaseAll()
+            end
+        end,
+    })
+    -- 不存檔：避免下次載入設定時自己開始跳
+
+    AfkTab:CreateToggle({
+        Name = "失敗後自動重試（最多 5 次）", CurrentValue = true,
+        Callback = function(v) autoRetry = v end,
+    })
+
+    local dMethod = AfkTab:CreateDropdown({
+        Name = "操作方式（鍵盤沒反應就換按鈕）",
+        Options = {"鍵盤", "按鈕"},
+        CurrentOption = {method},
+        Callback = function(opt)
+            local s = type(opt) == "table" and opt[1] or opt
+            if s == "鍵盤" or s == "按鈕" then
+                releaseAll()
+                method = s
+            end
+        end,
+    })
+    regDropdown("lavaMethod", dMethod, function() return method end, function(v)
+        method = v
+    end)
+
+    local statusBtn = AfkTab:CreateButton({
+        Name = "攀爬狀態  --",
+        Callback = function()
+            local text = table.concat(logBuf, "\n")
+            if setclipboard then pcall(setclipboard, text) end
+            notify("攀爬狀態", status, 4)
+        end,
+    })
+    task.spawn(function()
+        while true do
+            statusBtn:SetName("攀爬狀態  " .. status)
+            task.wait(0.3)
+        end
+    end)
+
+    UI:OnClose(function()
+        climbOn = false
+        releaseAll()
+        conn:Disconnect()
+    end)
+end
 
 -- ===== 設定 =====
 AfkTab:CreateSection("設定")
