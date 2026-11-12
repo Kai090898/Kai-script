@@ -1661,1706 +1661,467 @@ do
     end)
 end
 -- ====================================================================
---  櫻 mini game AFK（獨立的第二個介面）
---  功能：自動撿花（走過去）、自動翻機器人
---  移動方式：改用玩家螢幕上的搖桿移動（遊戲的移動由伺服器控制，直接叫角色走會被拉回原地）
---  介面庫與主腳本共用同一個「卡依ui」，但會開成獨立的第二個視窗
+--  悠閒釣魚自動化（貼進「櫻mini game」，放在小農場那一段的後面、
+--  「-- ===== 設定 =====」的前面）
+--  做法：讀取 FishingGui 畫面上的文字和進度條，用空白鍵（或按鈕事件）
+--  模擬「按住 / 放開」。不會自己打開釣魚畫面，請先把畫面打開
 -- ====================================================================
-local env = (getgenv and getgenv()) or _G
-
--- 已經開著的話，直接把視窗叫出來就好（不要重新建立，免得掛機狀態被重設）
-if env.KaiSakuraAFK and env.KaiSakuraAFK.alive() then
-    env.KaiSakuraAFK.show()
-    return
-end
-
-local UI = loadstring(game:HttpGet("https://raw.githubusercontent.com/Kai090898/Kai-script/refs/heads/main/%E5%8D%A1%E4%BE%9Dui"))()
-
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local HttpService = game:GetService("HttpService")
-local LocalPlayer = Players.LocalPlayer
-
-local function notify(title, content, duration)
-    UI:Notify({Title = title, Content = content, Duration = duration or 3})
-end
-
-local function getHumanoid()
-    local char = LocalPlayer.Character
-    return char and char:FindFirstChildOfClass("Humanoid")
-end
-
-local function getRoot()
-    local char = LocalPlayer.Character
-    return char and char:FindFirstChild("HumanoidRootPart")
-end
-
--- 這個介面沒有英文切換，這兩個是給下面共用的程式用的
-local langItems = {}
-local useEnglish = false
-
--- 掛機區與翻機器人之間互相呼叫用
-local FarmAPI = {}
-
--- ===== 穿透（Noclip）：自動撿花啟動時會自動打開 =====
-local noclipOn = false
-local noclipParts = {}
-
-local function restoreNoclip()
-    for p in pairs(noclipParts) do
-        if p.Parent then
-            p.CanCollide = true
-        end
-    end
-    noclipParts = {}
-end
-
-RunService.Stepped:Connect(function()
-    if not noclipOn then
-        return
-    end
-    local char = LocalPlayer.Character
-    if not char then
-        return
-    end
-    for _, p in ipairs(char:GetDescendants()) do
-        if p:IsA("BasePart") and p.CanCollide then
-            noclipParts[p] = true
-            p.CanCollide = false
-        end
-    end
-end)
-
--- 讓下面的程式可以用 tNoclip:Set(true/false)
-local tNoclip = {}
-function tNoclip:Set(v)
-    noclipOn = v and true or false
-    if not noclipOn then
-        restoreNoclip()
-    end
-end
-
--- ===== 搖桿移動 =====
--- 遊戲的移動是伺服器在控制，叫角色直接走（MoveTo）會被拉回原地，
--- 所以改成「操作螢幕上的搖桿」：
---   搖桿（模擬觸控）：在螢幕搖桿上模擬手指按住、推動
---   搖桿（控制模組）：直接對遊戲的控制模組輸出搖桿的移動方向（模擬觸控沒反應時用）
---   飄（飛行）：像主腳本的「飛行」一樣飄在地面上方移動（不會踩到傳送陣）
---   直接走（舊方式）：原本的 MoveTo
-local GuiService = game:GetService("GuiService")
-local VIM = game:GetService("VirtualInputManager")
-
-local MODE_NAMES = {"搖桿（模擬觸控）", "搖桿（控制模組）", "飄（飛行）", "直接走（舊方式）"}
-local MODE_LABELS = {
-    ["搖桿（模擬觸控）"] = "touch",
-    ["搖桿（控制模組）"] = "module",
-    ["飄（飛行）"] = "fly",
-    ["直接走（舊方式）"] = "moveto",
-}
-
-local Move = {
-    mode = "touch",
-    modeName = MODE_NAMES[1],
-    dir = nil,               -- 想走的方向（水平的單位向量），nil = 不動
-    vec = Vector3.zero,      -- 搖桿的輸出（相機座標）
-    touching = false,
-    lx = 0, ly = 0,
-    area = nil, pad = 2,     -- 撿花時用來把角色限制在區域內
-    dist = 0,                -- 離目標的水平距離
-    flySpeed = 30,           -- 飄行速度
-    hover = 4,               -- 飄行時離地高度
-    bv = nil,                -- 飄行用的 BodyVelocity
-    users = {},              -- 哪些功能正在用移動（撿花、翻機器人）
-    active = false,
-}
-local TOUCH_ID = 11
-local hasTouchApi = pcall(function()
-    local _ = VIM.SendTouchEvent
-end)
-
-local function flat(v)
-    return Vector3.new(v.X, 0, v.Z)
-end
-
--- 找螢幕上的搖桿（固定搖桿或動態搖桿）
-local function findStick()
-    local pg = LocalPlayer:FindFirstChild("PlayerGui")
-    local tg = pg and pg:FindFirstChild("TouchGui")
-    local tf = tg and tg:FindFirstChild("TouchControlFrame")
-    if not tf then
-        return nil
-    end
-    for _, name in ipairs({"ThumbstickFrame", "DynamicThumbstickFrame"}) do
-        local f = tf:FindFirstChild(name)
-        if f and f.Visible then
-            return f, name, tg
-        end
-    end
-    return nil
-end
-
--- 搖桿的中心點（螢幕座標）和推到底的半徑
-local function stickGeometry()
-    local f, name, tg = findStick()
-    if not f then
-        return nil
-    end
-    local inset = Vector2.new(0, 0)
-    if tg and not tg.IgnoreGuiInset then
-        inset = GuiService:GetGuiInset()
-    end
-    local pos, size = f.AbsolutePosition + inset, f.AbsoluteSize
-    if name == "ThumbstickFrame" then
-        return pos + size / 2, math.min(size.X, size.Y) / 2 * 0.8
-    end
-    -- 動態搖桿：在這個區域內按下去的位置就是搖桿中心
-    return pos + Vector2.new(size.X * 0.5, size.Y * 0.6), 55
-end
-
-local function sendTouch(state, x, y)
-    return pcall(function()
-        VIM:SendTouchEvent(TOUCH_ID, state, x, y)
-    end)
-end
-
--- 實際用的方式：模擬觸控找不到搖桿或不支援時，自動改用控制模組
-function Move.effective()
-    if Move.mode == "moveto" then
-        return "moveto"
-    end
-    if Move.mode == "fly" then
-        return "fly"
-    end
-    if Move.mode == "touch" and hasTouchApi and stickGeometry() then
-        return "touch"
-    end
-    return "module"
-end
-
--- 控制模組：把遊戲讀搖桿的函式換成我們的輸出（沒在移動時還是用真的搖桿）
-local hooked = nil
-local lastHookTry = 0
-local function ensureHook()
-    if tick() - lastHookTry < 0.5 then
-        return
-    end
-    lastHookTry = tick()
-    local ok, ctrl = pcall(function()
-        local ps = LocalPlayer:FindFirstChild("PlayerScripts")
-        local pm = ps and ps:FindFirstChild("PlayerModule")
-        return pm and require(pm):GetControls()
-    end)
-    if not (ok and ctrl) then
-        return
-    end
-    local ac = ctrl.activeController
-    if ac and hooked ~= ac then
-        hooked = ac
-        local og = ac.GetMoveVector
-        ac.GetMoveVector = function(self2, ...)
-            if Move.dir and Move.effective() == "module" then
-                return Move.vec
-            end
-            return og(self2, ...)
-        end
-    end
-end
-
--- 朝 pos 的方向走（clamp = true 時不讓角色走出掛機區）
-function Move.to(hum, root, pos, clamp)
-    if Move.effective() == "moveto" then
-        hum:MoveTo(pos)
-        return
-    end
-    local off = flat(pos - root.Position)
-    Move.dist = off.Magnitude
-    if off.Magnitude < 1 then
-        Move.dir = nil
-        return
-    end
-    local d = off.Unit
-    if clamp and Move.area then
-        local a, pad, p = Move.area, Move.pad, root.Position
-        local x, z = d.X, d.Z
-        if p.X <= a.minX + pad and x < 0 then x = 0 end
-        if p.X >= a.maxX - pad and x > 0 then x = 0 end
-        if p.Z <= a.minZ + pad and z < 0 then z = 0 end
-        if p.Z >= a.maxZ - pad and z > 0 then z = 0 end
-        local v = Vector3.new(x, 0, z)
-        if v.Magnitude < 0.2 then
-            Move.dir = nil
-            return
-        end
-        d = v.Unit
-    end
-    Move.dir = d
-end
-
-function Move.stop(hum, root)
-    Move.dir = nil
-    if Move.mode == "moveto" and hum and root then
-        hum:MoveTo(root.Position)
-    end
-end
-
--- 放開搖桿（關閉腳本時用）
-function Move.release()
-    Move.dir = nil
-    Move.users.petal, Move.users.flip = false, false
-    Move.active = false
-    Move.dropFly()
-    if Move.touching then
-        sendTouch(2, Move.lx, Move.ly)
-        Move.touching = false
-    end
-end
-
--- 開始用搖桿前的檢查：找不到搖桿、或選單擋住搖桿時提醒
-function Move.check()
-    if Move.mode == "touch" and Move.effective() ~= "touch" then
-        notify("找不到螢幕搖桿", "已改用控制模組模擬搖桿；沒反應的話，到「移動方式」換一種", 6)
-    elseif Move.effective() == "touch" then
-        local c = stickGeometry()
-        if c and UI:IsOverMenu(c.X, c.Y) then
-            notify("選單擋住搖桿", "請先隱藏選單，不然搖桿會按不到", 6)
-        end
-    end
-end
-
--- 哪個功能正在使用移動（都沒在用時，飄行會關掉）
-function Move.setUser(name, v)
-    Move.users[name] = v and true or false
-    Move.active = (Move.users.petal or Move.users.flip) and true or false
-end
-
--- 飄行：用 BodyVelocity 讓角色飄在地面上方，水平方向朝目標移動
-local flyParams = RaycastParams.new()
-flyParams.FilterType = Enum.RaycastFilterType.Exclude
-
-function Move.dropFly()
-    Move.gyF = nil
-    if Move.bv then
-        Move.bv:Destroy()
-        Move.bv = nil
-    end
-end
-
-local function groundYAt(pos)
-    local ignore = {}
-    if LocalPlayer.Character then
-        table.insert(ignore, LocalPlayer.Character)
-    end
-    local petals = workspace:FindFirstChild("FlowerPetals")
-    if petals then
-        table.insert(ignore, petals)
-    end
-    flyParams.FilterDescendantsInstances = ignore
-    local hit = workspace:Raycast(pos + Vector3.new(0, 2, 0), Vector3.new(0, -300, 0), flyParams)
-    return hit and hit.Position.Y or nil
-end
-
-function Move.flyStep(d)
-    local root = getRoot()
-    if not (root and Move.active) then
-        Move.dropFly()
-        return
-    end
-    if not Move.bv or Move.bv.Parent ~= root then
-        Move.dropFly()
-        local bv = Instance.new("BodyVelocity")
-        bv.MaxForce = Vector3.new(1e9, 1e9, 1e9)
-        bv.Velocity = Vector3.zero
-        bv.Parent = root
-        Move.bv = bv
-    end
-    -- 垂直：維持在地面上方 hover 格；水平：朝目標移動，越靠近越慢
-    local gy = groundYAt(root.Position)
-    local vy = 0
-    if gy then
-        -- 地面高度做平滑，避免偵測到的地面忽高忽低，讓角色上下抖
-        Move.gyF = Move.gyF and (Move.gyF + (gy - Move.gyF) * 0.15) or gy
-        local err = (Move.gyF + Move.hover) - root.Position.Y
-        -- 差不到 0.5 格就不修正（死區），不然停下來時會一直上下晃
-        if math.abs(err) > 0.5 then
-            vy = math.clamp(err * 3, -25, 25)
-        end
-    end
-    local hv = Vector3.zero
-    if d then
-        hv = d * math.min(Move.flySpeed, math.max(Move.dist, 1) * 6)
-    end
-    Move.bv.Velocity = Vector3.new(hv.X, vy, hv.Z)
-end
-
-RunService.Heartbeat:Connect(function()
-    local d = Move.dir
-    local mode = Move.effective()
-
-    -- 不用觸控了（停止、或換了方式）就放開手指
-    if Move.touching and not (d and mode == "touch") then
-        sendTouch(2, Move.lx, Move.ly)
-        Move.touching = false
-    end
-    if mode == "fly" then
-        Move.flyStep(d)
-        return
-    else
-        Move.dropFly()
-    end
-    if not d or mode == "moveto" then
-        return
-    end
-
-    local cam = workspace.CurrentCamera
-    if not cam then
-        return
-    end
-    -- 搖桿往上 = 相機的前方，所以要把世界方向換成「相機的前、右」
-    local look, right = flat(cam.CFrame.LookVector), flat(cam.CFrame.RightVector)
-    if look.Magnitude > 0.01 then look = look.Unit end
-    if right.Magnitude > 0.01 then right = right.Unit end
-    local sx, sy = d:Dot(right), d:Dot(look)
-    Move.vec = Vector3.new(sx, 0, -sy)
-
-    if mode == "touch" then
-        local center, radius = stickGeometry()
-        if center then
-            if not Move.touching then
-                sendTouch(0, center.X, center.Y)
-                Move.touching = true
-            end
-            local p = center + Vector2.new(sx, -sy) * radius
-            Move.lx, Move.ly = p.X, p.Y
-            sendTouch(1, p.X, p.Y)
-        end
-    else
-        ensureHook()
-    end
-end)
-
--- ===== 設定存檔（只存這個介面自己的設定）=====
-local CONFIG_FILE = "KaiScript_SakuraAFK.json"
-local reg = {}
-
-local function regToggle(key, el, get)
-    table.insert(reg, {key = key, kind = "toggle", el = el, get = get})
-end
-local function regNumber(key, el, get, set)
-    table.insert(reg, {key = key, kind = "number", el = el, get = get, set = set})
-end
-local function regDropdown(key, el, get, set)
-    table.insert(reg, {key = key, kind = "dropdown", el = el, get = get, set = set})
-end
-local function regText(key, el, get, set)
-    table.insert(reg, {key = key, kind = "text", el = el, get = get, set = set})
-end
-
-local function saveConfig()
-    if not (writefile and HttpService) then
-        notify("無法儲存", "這個執行器不支援檔案功能")
-        return
-    end
-    local data = {}
-    for _, r in ipairs(reg) do
-        data[r.key] = r.get()
-    end
-    local ok, err = pcall(function()
-        writefile(CONFIG_FILE, HttpService:JSONEncode(data))
-    end)
-    if ok then
-        notify("已儲存", "櫻 mini game AFK 的設定已存檔")
-    else
-        notify("儲存失敗", tostring(err))
-    end
-end
-
-local function loadConfig(quiet)
-    if not (isfile and readfile) or not isfile(CONFIG_FILE) then
-        if not quiet then
-            notify("沒有存檔", "請先按「儲存設定」")
-        end
-        return
-    end
-    local ok, data = pcall(function()
-        return HttpService:JSONDecode(readfile(CONFIG_FILE))
-    end)
-    if not ok or type(data) ~= "table" then
-        return
-    end
-    -- 先套用數字、選項和文字（地塊要先於掛機點），再套用開關
-    for _, r in ipairs(reg) do
-        local v = data[r.key]
-        if v ~= nil then
-            if r.kind == "number" and type(v) == "number" then
-                pcall(function() r.set(v) r.el:Set(tostring(v)) end)
-            elseif r.kind == "dropdown" and type(v) == "string" then
-                pcall(function() r.set(v) r.el:Set({v}) end)
-            elseif r.kind == "text" and type(v) == "string" then
-                pcall(function() r.set(v) r.el:Set(v) end)
-            end
-        end
-    end
-    for _, r in ipairs(reg) do
-        local v = data[r.key]
-        if v ~= nil and r.kind == "toggle" and type(v) == "boolean" then
-            pcall(function() r.el:Set(v) end)
-        end
-    end
-    if not quiet then
-        notify("已載入", "設定已套用")
-    end
-end
-
--- ===== 介面 =====
-local Window = UI:CreateWindow({
-    Name = "櫻 mini game AFK",
-    GuiName = "KaiUI_SakuraAFK",
-    FloatText = "櫻",
-    FloatPosition = UDim2.new(0, 10, 0.55, 0),
-    PositionOffset = Vector2.new(30, 20),
-    DisplayOrder = 101,
-    Theme = "black",  -- 額外的介面一律用純黑主題
-})
-
-local AfkTab = Window:CreateTab("掛機")
-
-AfkTab:CreateSection("移動方式")
-
-local dMove = AfkTab:CreateDropdown({
-    Name = "移動方式",
-    Options = MODE_NAMES,
-    CurrentOption = {Move.modeName},
-    Callback = function(opt)
-        local n = type(opt) == "table" and opt[1] or opt
-        if MODE_LABELS[n] then
-            Move.mode = MODE_LABELS[n]
-            Move.modeName = n
-        end
-    end,
-})
-regDropdown("moveMode", dMove, function() return Move.modeName end, function(v)
-    if MODE_LABELS[v] then
-        Move.mode = MODE_LABELS[v]
-        Move.modeName = v
-    end
-end)
-
-local iFlySpeed = AfkTab:CreateInput({
-    Name = "飄行速度",
-    PlaceholderText = "預設 30（只有「飄」會用到）",
-    Callback = function(text)
-        local n = tonumber(text)
-        if n and n >= 5 and n <= 150 then
-            Move.flySpeed = n
-            notify("已設定", "飄行速度 = " .. n)
-        else
-            notify("輸入錯誤", "請輸入 5~150 的數字")
-        end
-    end,
-})
-regNumber("flySpeed", iFlySpeed, function() return Move.flySpeed end, function(v)
-    Move.flySpeed = v
-end)
-
-local iHover = AfkTab:CreateInput({
-    Name = "飄行高度（離地幾格）",
-    PlaceholderText = "預設 4，太高會撿不到花",
-    Callback = function(text)
-        local n = tonumber(text)
-        if n and n >= 1 and n <= 30 then
-            Move.hover = n
-            notify("已設定", "飄行高度 = " .. n)
-        else
-            notify("輸入錯誤", "請輸入 1~30 的數字")
-        end
-    end,
-})
-regNumber("hover", iHover, function() return Move.hover end, function(v)
-    Move.hover = v
-end)
-
--- 掛機
-AfkTab:CreateSection("掛機")
-
-do
-    local petalOn = false
-    local petalRange = 120
-    local goHomeOn = true                            -- 撿完花走回掛機點
-    local homePos = Vector3.new(652, 4, -598)        -- 掛機區的重生點
-    local zoneName = "全部"
-    local onHomeChanged = function() end             -- 掛機點被自動換掉時，更新輸入框（稍後指定）
-    local skipUntil = setmetatable({}, {__mode = "k"})  -- 撿不到的花先跳過一陣子
-
-    -- ===== 掛機區範圍（四個角量出來的座標）=====
-    local AREA = {minX = 587, maxX = 1001, minZ = -693, maxZ = -495}
-    local EDGE_PAD = 2        -- 角色離邊界至少保持的距離（格）
-    Move.area, Move.pad = AREA, EDGE_PAD
-
-    -- 位置是否在掛機區內（超出去的花不撿）
-    local function inArea(pos)
-        return pos.X >= AREA.minX + 1 and pos.X <= AREA.maxX - 1
-            and pos.Z >= AREA.minZ + 1 and pos.Z <= AREA.maxZ - 1
-    end
-
-    -- 四面牆（只在你自己的畫面裡存在，用來擋住不要掉出去）
-    local wallFolder = nil
-
-    local function clearWalls()
-        if wallFolder then
-            wallFolder:Destroy()
-            wallFolder = nil
-        end
-    end
-
-    local function buildWalls()
-        clearWalls()
-        wallFolder = Instance.new("Folder")
-        wallFolder.Name = "KaiWalls"
-        wallFolder.Parent = workspace
-
-        local T, H, Y = 4, 60, 20   -- 厚度、高度、中心高度
-        local cx, cz = (AREA.minX + AREA.maxX) / 2, (AREA.minZ + AREA.maxZ) / 2
-        local w, d = AREA.maxX - AREA.minX, AREA.maxZ - AREA.minZ
-
-        local function wall(size, pos)
-            local part = Instance.new("Part")
-            part.Anchored = true
-            part.CanCollide = true
-            part.CanTouch = false
-            part.CanQuery = false
-            part.CastShadow = false
-            part.Material = Enum.Material.SmoothPlastic
-            part.Color = Color3.fromRGB(180, 220, 255)
-            part.Transparency = 0.85
-            part.Size = size
-            part.Position = pos
-            part.Parent = wallFolder
-        end
-
-        -- 牆的內側剛好貼在區域邊界上
-        wall(Vector3.new(w + 2 * T, H, T), Vector3.new(cx, Y, AREA.minZ - T / 2))
-        wall(Vector3.new(w + 2 * T, H, T), Vector3.new(cx, Y, AREA.maxZ + T / 2))
-        wall(Vector3.new(T, H, d), Vector3.new(AREA.minX - T / 2, Y, cz))
-        wall(Vector3.new(T, H, d), Vector3.new(AREA.maxX + T / 2, Y, cz))
-    end
-
-    -- ===== 地塊選擇 =====
-    local ZONES = {
-        ["草地區"] = {minX = 717, maxX = 1001, minZ = -693, maxZ = -495, home = Vector3.new(824, 1, -581)},
-        ["木板區"] = {minX = 587, maxX = 717, minZ = -693, maxZ = -496, home = Vector3.new(652, 4, -598)},
-        ["全部"] = {minX = 587, maxX = 1001, minZ = -693, maxZ = -495},  -- 掛機點自己調
-    }
-
-    local function setZone(name)
-        local z = ZONES[name]
-        if not z then
-            return
-        end
-        zoneName = name
-        AREA.minX, AREA.maxX, AREA.minZ, AREA.maxZ = z.minX, z.maxX, z.minZ, z.maxZ
-        if z.home then
-            homePos = z.home  -- 草地區、木板區的掛機點自動換成預設的
-            onHomeChanged()
-        end
-        if petalOn then
-            buildWalls()  -- 自動撿花開著時，牆也跟著換位置
-        end
-    end
-
-    -- ===== 避開傳送陣 =====
-    local HAZARD_MARGIN = 3.5   -- 離傳送陣邊緣至少保持的距離
-    local hazards = {}
-    local lastHazardScan = 0
-
-    local function scanHazards()
-        if tick() - lastHazardScan < 8 then
-            return
-        end
-        lastHazardScan = tick()
-        local list = {}
-        local scopes = {}
-        for _, name in ipairs({"SakuraRestArea", "RobotTreasureHunt"}) do
-            local f = workspace:FindFirstChild(name)
-            if f then
-                table.insert(scopes, f)
-            end
-        end
-        if #scopes == 0 then
-            scopes = {workspace}
-        end
-        for _, scope in ipairs(scopes) do
-            for _, v in ipairs(scope:GetDescendants()) do
-                if v:IsA("BasePart") and v.Name:lower():find("teleport") then
-                    table.insert(list, v)
-                end
-            end
-        end
-        hazards = list
-    end
-
-    local function toLocal2(part, pos)
-        local p = part.CFrame:PointToObjectSpace(pos)
-        return Vector2.new(p.X, p.Z)
-    end
-
-    local function toWorld(part, v2, y)
-        local w = part.CFrame:PointToWorldSpace(Vector3.new(v2.X, 0, v2.Y))
-        return Vector3.new(w.X, y, w.Z)
-    end
-
-    -- 線段 a→b 是否穿過以原點為中心、半寬 hx、半長 hz 的矩形
-    local function segHits(a, b, hx, hz)
-        local d = b - a
-        local t0, t1 = 0, 1
-        local axes = {{a.X, d.X, hx}, {a.Y, d.Y, hz}}
-        for _, ax in ipairs(axes) do
-            local ao, dd, h = ax[1], ax[2], ax[3]
-            if math.abs(dd) < 1e-6 then
-                if ao < -h or ao > h then
-                    return false
-                end
-            else
-                local ta, tb = (-h - ao) / dd, (h - ao) / dd
-                if ta > tb then
-                    ta, tb = tb, ta
-                end
-                t0 = math.max(t0, ta)
-                t1 = math.min(t1, tb)
-                if t0 > t1 then
-                    return false
-                end
-            end
-        end
-        return true
-    end
-
-    local function hazardHalf(part)
-        return part.Size.X / 2 + HAZARD_MARGIN, part.Size.Z / 2 + HAZARD_MARGIN
-    end
-
-    -- 這個位置是否在傳送陣（含安全距離）範圍內
-    local function inHazard(pos)
-        for _, h in ipairs(hazards) do
-            if h.Parent then
-                local hx, hz = hazardHalf(h)
-                local a = toLocal2(h, pos)
-                if math.abs(a.X) < hx and math.abs(a.Y) < hz then
-                    return true
-                end
-            end
-        end
-        return false
-    end
-
-    -- 從 from 走到 to，如果會踩到傳送陣，回傳要先繞過去的中繼點；不用繞就回傳 nil
-    local function detour(from, to)
-        scanHazards()
-        for _, h in ipairs(hazards) do
-            if h.Parent then
-                local hx, hz = hazardHalf(h)
-                local a, b = toLocal2(h, from), toLocal2(h, to)
-                local y = from.Y
-
-                -- 已經站在危險範圍裡：先往最近的邊走出去
-                if math.abs(a.X) < hx and math.abs(a.Y) < hz then
-                    local dx, dz = hx - math.abs(a.X), hz - math.abs(a.Y)
-                    local out
-                    if dx < dz then
-                        out = Vector2.new((a.X >= 0 and 1 or -1) * (hx + 1), a.Y)
-                    else
-                        out = Vector2.new(a.X, (a.Y >= 0 and 1 or -1) * (hz + 1))
-                    end
-                    return toWorld(h, out, y)
-                end
-
-                local ehx, ehz = hx - 0.05, hz - 0.05
-                if segHits(a, b, ehx, ehz) then
-                    local c = {
-                        Vector2.new(-hx, -hz), Vector2.new(hx, -hz),
-                        Vector2.new(hx, hz), Vector2.new(-hx, hz),
-                    }
-                    local best, bestLen
-                    local function consider(first, pts)
-                        local prev, len = a, 0
-                        for _, q in ipairs(pts) do
-                            if segHits(prev, q, ehx, ehz) then
-                                return
-                            end
-                            len += (q - prev).Magnitude
-                            prev = q
-                        end
-                        if segHits(prev, b, ehx, ehz) then
-                            return
-                        end
-                        len += (b - prev).Magnitude
-                        if not bestLen or len < bestLen then
-                            best, bestLen = first, len
-                        end
-                    end
-                    for i = 1, 4 do
-                        consider(c[i], {c[i]})
-                        consider(c[i], {c[i], c[i % 4 + 1]})
-                    end
-                    if best then
-                        return toWorld(h, best, y)
-                    end
-                end
-            end
-        end
-        return nil
-    end
-
-    FarmAPI.detour = detour
-    FarmAPI.inHazard = inHazard
-
-    -- 預測花最後會落在哪裡：往正下方打射線找地面，
-    -- 如果花是會受重力往下掉的，再把水平的飄移一起算進去
-    local landParams = RaycastParams.new()
-    landParams.FilterType = Enum.RaycastFilterType.Exclude
-
-    local function landingPoint(petal)
-        local pos = petal.Position
-        local ignore = {}
-        if LocalPlayer.Character then
-            table.insert(ignore, LocalPlayer.Character)
-        end
-        local folder = workspace:FindFirstChild("FlowerPetals")
-        if folder then
-            table.insert(ignore, folder)
-        end
-        landParams.FilterDescendantsInstances = ignore
-
-        local hit = workspace:Raycast(pos, Vector3.new(0, -1000, 0), landParams)
-        local groundY = hit and hit.Position.Y or pos.Y
-        local h = math.max(pos.Y - groundY, 0)
-        local x, z = pos.X, pos.Z
-
-        if not petal.Anchored and h > 1 then
-            local v = petal.AssemblyLinearVelocity
-            local g = workspace.Gravity
-            local t = (v.Y + math.sqrt(v.Y * v.Y + 2 * g * h)) / g
-            t = math.clamp(t, 0, 6)
-            x += v.X * t
-            z += v.Z * t
-        end
-        return Vector3.new(x, groundY, z), h
-    end
-
-    -- 找範圍內最近的花（用預測的落地點算距離）
-    local function nearestPetal(root)
-        local folder = workspace:FindFirstChild("FlowerPetals")
-        if not folder then
-            return nil
-        end
-        scanHazards()
-        local best, bestD
-        for _, p in ipairs(folder:GetDescendants()) do
-            if p:IsA("BasePart") and p.Name == "Petal" and p.Parent
-                and (skipUntil[p] or 0) < tick() then
-                local land = landingPoint(p)
-                if inArea(land) and not inHazard(land) then
-                    local off = land - root.Position
-                    local flat = Vector3.new(off.X, 0, off.Z).Magnitude
-                    if flat <= petalRange and (not bestD or flat < bestD) then
-                        best, bestD = p, flat
-                    end
-                end
-            end
-        end
-        return best
-    end
-
-    -- 走到花的落地點等它：一直更新預測位置，卡住就跳
-    local function walkTo(hum, root, petal)
-        local t0 = tick()
-        local lastPos, lastCheck = root.Position, tick()
-        local reachedAt = nil
-        while petalOn and petal.Parent and tick() - t0 < 12 and hum.Health > 0 do
-            local land, h = landingPoint(petal)
-
-            -- 落地點如果在傳送陣範圍內就放棄這朵
-            if inHazard(land) or not inArea(land) then
-                break
-            end
-
-            -- 如果直線會踩到傳送陣，先走到繞路的中繼點
-            local wp = detour(root.Position, land)
-            Move.to(hum, root, wp or land, true)
-
-            local off = land - root.Position
-            local flat = Vector3.new(off.X, 0, off.Z).Magnitude
-            if flat < 2.5 and h < 4 then
-                -- 花已經快落地了，站在那裡超過 1.5 秒還沒撿到，就放棄這朵
-                reachedAt = reachedAt or tick()
-                if tick() - reachedAt > 1.5 then
-                    break
-                end
-            else
-                reachedAt = nil
-            end
-
-            -- 卡住偵測：0.7 秒幾乎沒移動就跳一下（站著等花落下時不算）
-            if tick() - lastCheck > 0.7 then
-                if (root.Position - lastPos).Magnitude < 1 and flat > 3 then
-                    hum.Jump = true
-                end
-                lastPos, lastCheck = root.Position, tick()
-            end
-            task.wait(0.1)
-        end
-        if petal.Parent then
-            skipUntil[petal] = tick() + 5  -- 沒撿掉的花，5 秒內不再追
-        end
-    end
-
-    -- 走回掛機點；途中如果範圍內出現花，就立刻停下來（回到主迴圈去追花）
-    local function walkHome(hum, root)
-        local t0 = tick()
-        local lastPos, lastCheck = root.Position, tick()
-        while petalOn and goHomeOn and hum.Health > 0 and tick() - t0 < 30 do
-            local off = homePos - root.Position
-            local flat = Vector3.new(off.X, 0, off.Z).Magnitude
-            if flat < 3 then
-                break
-            end
-            if nearestPetal(root) then
-                return
-            end
-
-            local wp = detour(root.Position, homePos)
-            Move.to(hum, root, wp or homePos, true)
-
-            if tick() - lastCheck > 0.7 then
-                if (root.Position - lastPos).Magnitude < 1 then
-                    hum.Jump = true
-                end
-                lastPos, lastCheck = root.Position, tick()
-            end
-            task.wait(0.15)
-        end
-    end
-
-    task.spawn(function()
-        local wasOn = false
-        while true do
-            if petalOn then
-                wasOn = true
-                local root = getRoot()
-                local hum = getHumanoid()
-                if root and hum and hum.Health > 0 and not hum.Sit then
-                    local petal = nearestPetal(root)
-                    if petal then
-                        pcall(walkTo, hum, root, petal)
-                    elseif goHomeOn then
-                        local off = homePos - root.Position
-                        if Vector3.new(off.X, 0, off.Z).Magnitude >= 3 then
-                            pcall(walkHome, hum, root)
-                        else
-                            Move.stop(hum, root)
-                            task.wait(0.3)
-                        end
-                    else
-                        Move.stop(hum, root)
-                        task.wait(0.3)
-                    end
-                else
-                    Move.stop(hum, root)
-                    task.wait(0.5)
-                end
-                task.wait()
-            else
-                if wasOn then
-                    wasOn = false
-                    local root, hum = getRoot(), getHumanoid()
-                    if root and hum then
-                        Move.stop(hum, root)  -- 停下來
-                    end
-                end
-                task.wait(0.3)
-            end
-        end
-    end)
-
-    local dZone = AfkTab:CreateDropdown({
-        Name = "地塊選擇",
-        Options = {"草地區", "木板區", "全部"},
-        CurrentOption = {zoneName},
-        Callback = function(opt)
-            local z = type(opt) == "table" and opt[1] or opt
-            if ZONES[z] then
-                setZone(z)
-            end
-        end,
-    })
-    regDropdown("petalZone", dZone, function() return zoneName end, function(v)
-        setZone(v)
-    end)
-
-    local autoNoclip = false  -- 穿透是不是由「自動撿花」幫你打開的
-    local autoNoclipOn = true  -- 撿花時要不要自動開穿透
-    local tPetal = AfkTab:CreateToggle({
-        Name = "自動撿花（走過去）",
-        CurrentValue = false,
-        Callback = function(v)
-            petalOn = v
-            Move.setUser("petal", v)
-            if v then
-                buildWalls()
-                Move.check()
-            else
-                clearWalls()
-                Move.stop(getHumanoid(), getRoot())
-            end
-            -- 啟動時自動開穿透，讓角色能直接穿過物件走過去；關閉時只還原自己開的那次
-            if v and autoNoclipOn and Move.mode ~= "fly" and not noclipOn then
-                autoNoclip = true
-                pcall(function() tNoclip:Set(true) end)
-            elseif not v and autoNoclip then
-                autoNoclip = false
-                pcall(function() tNoclip:Set(false) end)
-            end
-        end,
-    })
-    -- 不存檔：避免下次載入設定時一開腳本就自己開始撿花、亂跑
-
-    local tAutoNoclip = AfkTab:CreateToggle({
-        Name = "撿花時自動穿透",
-        CurrentValue = true,
-        Callback = function(v)
-            autoNoclipOn = v
-        end,
-    })
-    regToggle("autoNoclip", tAutoNoclip, function() return autoNoclipOn end)
-
-    UI:OnClose(function()
-        petalOn = false
-        Move.release()
-        clearWalls()
-        if autoNoclip then
-            autoNoclip = false
-            noclipOn = false
-            restoreNoclip()
-        end
-    end)
-
-    local iPetalRange = AfkTab:CreateInput({
-        Name = "撿花範圍（輸入數字）",
-        PlaceholderText = "預設 120，只追這個距離內的花",
-        Callback = function(text)
-            local n = tonumber(text)
-            if n and n > 0 then
-                petalRange = n
-                notify("已設定", "撿花範圍 = " .. n)
-            else
-                notify("輸入錯誤", "請輸入大於 0 的數字")
-            end
-        end,
-    })
-    regNumber("petalRange", iPetalRange, function() return petalRange end, function(v)
-        petalRange = v
-    end)
-
-    local tGoHome = AfkTab:CreateToggle({
-        Name = "撿完花走回掛機點",
-        CurrentValue = true,
-        Callback = function(v)
-            goHomeOn = v
-        end,
-    })
-    regToggle("petalGoHome", tGoHome, function() return goHomeOn end)
-
-    local function homeText()
-        return string.format("%.1f, %.1f, %.1f", homePos.X, homePos.Y, homePos.Z)
-    end
-
-    local function parseHome(text)
-        local x, y, z = tostring(text):match("(-?%d+%.?%d*)%s*[,%s]%s*(-?%d+%.?%d*)%s*[,%s]%s*(-?%d+%.?%d*)")
-        x, y, z = tonumber(x), tonumber(y), tonumber(z)
-        if x and y and z then
-            return Vector3.new(x, y, z)
-        end
-    end
-
-    local iHome = AfkTab:CreateInput({
-        Name = "掛機點座標（x, y, z）",
-        PlaceholderText = "預設 652, 4, -598",
-        Callback = function(text)
-            local v = parseHome(text)
-            if v then
-                homePos = v
-                notify("已設定掛機點", "(" .. homeText() .. ")")
-            else
-                notify("輸入錯誤", "請輸入三個數字，例如 652, 4, -598")
-            end
-        end,
-    })
-    onHomeChanged = function()
-        pcall(function() iHome:Set(homeText()) end)
-    end
-    FarmAPI.setHome = function(v)
-        homePos = v
-        onHomeChanged()
-    end
-
-    regText("petalHome", iHome, homeText, function(v)
-        local pv = parseHome(v)
-        if pv then
-            homePos = pv
-        end
-    end)
-
-    AfkTab:CreateButton({
-        Name = "把目前位置設為掛機點",
-        Callback = function()
-            local root = getRoot()
-            if root then
-                homePos = root.Position
-                notify("已設定掛機點", "(" .. homeText() .. ")")
-                pcall(function() iHome:Set(homeText()) end)
-            else
-                notify("設定失敗", "找不到角色")
-            end
-        end,
-    })
-end
-
--- ========== 翻機器人 ==========
-AfkTab:CreateSection("翻機器人")
-
-do
-    local flipOn = false
-    local flipDelay = 7.2         -- 遊戲每 7 秒才能點一次，多留 0.2 秒保險
-    local lastClickAt = 0
-    local jackpotFlowers = 3000   -- 中大獎會增加的花朵數（判斷用）
-    local targetInfo = "--"        -- 目前的目標（顯示用）
-    local extraDelay = 0           -- 遊戲自己有冷卻：沒收到回應就自動多等一點
-    local failCount = setmetatable({}, {__mode = "k"})
-    local lastResult, lastResultTime = nil, 0
-    local skipUntil = setmetatable({}, {__mode = "k"})
-    local tFlip
-
-    local function ser(v, d)
-        d = d or 0
-        if type(v) == "table" and d < 3 then
-            local t = {}
-            for k, x in pairs(v) do
-                table.insert(t, tostring(k) .. "=" .. ser(x, d + 1))
-            end
-            return "{" .. table.concat(t, ", ") .. "}"
-        end
-        return tostring(v)
-    end
-
-    -- 聽伺服器傳回來的點擊結果（沒中獎時會收到 type = "miss"）
-    task.spawn(function()
-        local ev = game:GetService("ReplicatedStorage"):WaitForChild("RobotGameEvent", 10)
-        if ev and ev:IsA("RemoteEvent") then
-            ev.OnClientEvent:Connect(function(...)
-                lastResult = {...}
-                lastResultTime = tick()
-            end)
-        else
-            warn("[卡依腳本] 找不到 RobotGameEvent，自動翻機器人無法判斷結果")
-        end
-    end)
-
-    -- 讀畫面上的花朵數（例如「🌸 5897 / 5000」或「🌸 5,897」）
-    local function dig(root, ...)
-        local cur = root
-        for _, name in ipairs({...}) do
-            cur = cur and cur:FindFirstChild(name)
-        end
-        return cur
-    end
-
-    local function readFlowers()
-        local pg = LocalPlayer:FindFirstChild("PlayerGui")
-        if not pg then
-            return nil
-        end
-        local lbl = dig(pg, "HintPurchaseUI", "FlowerCard", "FlowerText")
-            or dig(pg, "PinballGui", "Main", "Frame", "TextLabel")
-        local num = lbl and tostring(lbl.Text):match("([%d,]+)")
-        return num and tonumber((num:gsub(",", "")))
-    end
-
-    local function finish(title, msg)
-        flipOn = false
-        Move.stop(getHumanoid(), getRoot())
-        pcall(function() tFlip:Set(false) end)
-        notify(title, msg, 10)
-    end
-
-    local function nearestRobot(root)
-        local hunt = workspace:FindFirstChild("RobotTreasureHunt")
-        local folder = hunt and hunt:FindFirstChild("Robots")
-        if not folder then
-            return nil
-        end
-        local best, bestD, bestCd
-        for _, r in ipairs(folder:GetChildren()) do
-            if r:IsA("BasePart") and (skipUntil[r] or 0) < tick()
-                and r.Transparency < 0.95 then  -- 被翻掉消失的（變透明）不點
-                local cd = r:FindFirstChildOfClass("ClickDetector")
-                if cd and not (FarmAPI.inHazard and FarmAPI.inHazard(r.Position)) then
-                    local d = (r.Position - root.Position).Magnitude
-                    if not bestD or d < bestD then
-                        best, bestD, bestCd = r, d, cd
-                    end
-                end
-            end
-        end
-        return best, bestCd
-    end
-
-    -- 走到機器人旁邊（進入點擊距離內）
-    local function approach(hum, root, robot, cd)
-        local need = math.max(math.min(cd.MaxActivationDistance, 10) - 2, 4)
-        local t0 = tick()
-        local lastPos, lastCheck = root.Position, tick()
-        while flipOn and robot.Parent and robot.Transparency < 0.95
-            and hum.Health > 0 and tick() - t0 < 8 do
-            if (robot.Position - root.Position).Magnitude <= need then
-                return true
-            end
-            local wp = FarmAPI.detour and FarmAPI.detour(root.Position, robot.Position)
-            Move.to(hum, root, wp or robot.Position)
-            if tick() - lastCheck > 0.7 then
-                if (root.Position - lastPos).Magnitude < 1 then
-                    hum.Jump = true
-                end
-                lastPos, lastCheck = root.Position, tick()
-            end
-            task.wait(0.1)
-        end
-        return false
-    end
-
-    local function step()
-        local root, hum = getRoot(), getHumanoid()
-        if not (root and hum) or hum.Health <= 0 then
-            return
-        end
-        local robot, cd = nearestRobot(root)
-        if not robot then
-            targetInfo = "附近沒有可以點的機器人"
-            return
-        end
-        targetInfo = string.format("%s 透明=%.2f 距離=%d", robot.Name, robot.Transparency,
-            (robot.Position - root.Position).Magnitude)
-        targetInfo = targetInfo .. string.format(" 等待+%.1fs", extraDelay)
-
-        -- 一定要走到機器人旁邊才點（不能遠距點擊）
-        local arrived = approach(hum, root, robot, cd)
-        Move.stop(hum, root)
-        if not arrived then
-            skipUntil[robot] = tick() + 5
-            return
-        end
-        -- 冷卻還沒到就先站在旁邊等（走路的時間也算在冷卻裡，所以不會浪費）
-        while flipOn and robot.Parent and robot.Transparency < 0.95
-            and tick() - lastClickAt < flipDelay + extraDelay do
-            local left = flipDelay + extraDelay - (tick() - lastClickAt)
-            targetInfo = string.format("%s 冷卻中，還要等 %.1f 秒", robot.Name, math.max(left, 0))
-            task.wait(0.1)
-        end
-        if not (flipOn and robot.Parent) then
-            return
-        end
-        -- 走到之後、點之前，再確認一次它還在（可能剛好被別人翻掉了）
-        if robot.Transparency >= 0.95 then
-            skipUntil[robot] = tick() + 300
-            return
-        end
-
-        local before = lastResultTime
-        local flowersBefore = readFlowers()
-        local function gained()
-            local f = readFlowers()
-            return (f and flowersBefore) and (f - flowersBefore) or nil
-        end
-        lastClickAt = tick()
-        pcall(fireclickdetector, cd)
-
-        -- 等伺服器回報結果
-        local t0 = tick()
-        while flipOn and tick() - t0 < 2.5 and lastResultTime <= before do
-            task.wait(0.05)
-        end
-
-        if lastResultTime > before then
-            -- 伺服器有回應，代表這隻已經翻過了，5 分鐘內不再點（它可能只是變透明、還留在場上）
-            skipUntil[robot] = tick() + 300
-            local d = lastResult and lastResult[1]
-            local kind = type(d) == "table" and d.type or d
-            if kind ~= "miss" then
-                -- 不是「沒中」：再等最多 2 秒看花朵有沒有增加，用來確認是不是真的中大獎
-                local t1, g = tick(), gained()
-                while flipOn and tick() - t1 < 2 and not (g and g >= jackpotFlowers) do
-                    task.wait(0.1)
-                    g = gained()
-                end
-                if g and g >= jackpotFlowers then
-                    finish("中大獎了！", "花朵 +" .. g)
-                else
-                    finish("收到不是 miss 的結果",
-                        "花朵沒有增加 " .. jackpotFlowers .. "，請自己確認：" .. ser(lastResult))
-                end
-            else
-                -- 就算事件寫 miss，只要花朵一次暴增也算中獎
-                local g = gained()
-                if g and g >= jackpotFlowers then
-                    finish("中大獎了！", "花朵 +" .. g)
-                end
-            end
-        else
-            -- 沒收到回應：很可能還在遊戲自己的冷卻裡，不能硬點。
-            -- 自動多等 0.5 秒（最多 6 秒），同一隻最多重試 3 次才換下一隻
-            extraDelay = math.min(extraDelay + 0.5, 6)
-            failCount[robot] = (failCount[robot] or 0) + 1
-            if failCount[robot] >= 3 then
-                failCount[robot] = nil
-                skipUntil[robot] = tick() + 5
-            end
-        end
-    end
-
-    task.spawn(function()
-        while true do
-            if flipOn then
-                local ok, err = pcall(step)
-                if not ok then
-                    warn("[卡依腳本] 自動翻機器人錯誤：" .. tostring(err))
-                    task.wait(1)
-                end
-                task.wait(0.1)
-            else
-                task.wait(0.3)
-            end
-        end
-    end)
-
-    -- 顯示目前正要點的機器人（除錯用，點一下可以複製）
-    do
-        local n = #langItems
-        local targetBtn = AfkTab:CreateButton({
-            Name = "目前目標  --",
-            Callback = function()
-                if setclipboard then
-                    pcall(setclipboard, targetInfo)
-                end
-                notify("目前目標", targetInfo, 4)
-            end,
-        })
-        while #langItems > n do
-            table.remove(langItems)
-        end
-        task.spawn(function()
-            while true do
-                targetBtn:SetName((useEnglish and "Target  " or "目前目標  ") .. targetInfo)
-                task.wait(0.3)
-            end
-        end)
-    end
-
-    tFlip = AfkTab:CreateToggle({
-        Name = "自動翻機器人（到有結果為止）",
-        CurrentValue = false,
-        Callback = function(v)
-            if v and not fireclickdetector then
-                notify("無法啟用", "這個執行器不支援 fireclickdetector")
-                task.defer(function()
-                    pcall(function() tFlip:Set(false) end)
-                end)
-                return
-            end
-            flipOn = v
-            Move.setUser("flip", v)
-            if v then
-                Move.check()
-            else
-                Move.stop(getHumanoid(), getRoot())
-            end
-        end,
-    })
-    -- 不存檔：避免下次載入設定時一啟動就自動點
-
-    local iFlipDelay = AfkTab:CreateInput({
-        Name = "翻機器人間隔（秒）",
-        PlaceholderText = "預設 7.2（遊戲冷卻 7 秒）",
-        Callback = function(text)
-            local n = tonumber(text)
-            if n and n >= 0 then
-                flipDelay = n
-                notify("已設定", "間隔 = " .. n .. " 秒")
-            else
-                notify("輸入錯誤", "請輸入數字")
-            end
-        end,
-    })
-    regNumber("flipDelay", iFlipDelay, function() return flipDelay end, function(v)
-        flipDelay = v
-    end)
-
-    local iJackpot = AfkTab:CreateInput({
-        Name = "大獎花朵數（判斷用）",
-        PlaceholderText = "預設 3000，中大獎會增加的花朵",
-        Callback = function(text)
-            local n = tonumber(text)
-            if n and n > 0 then
-                jackpotFlowers = n
-                notify("已設定", "大獎花朵數 = " .. n)
-            else
-                notify("輸入錯誤", "請輸入大於 0 的數字")
-            end
-        end,
-    })
-    regNumber("jackpotFlowers", iJackpot, function() return jackpotFlowers end, function(v)
-        jackpotFlowers = v
-    end)
-
-    UI:OnClose(function()
-        flipOn = false
-    end)
-end
--- ====================================================================
---  每日小農場自動化（貼進「櫻mini game」，放在「-- ===== 設定 =====」那一段的前面）
---  做法：直接觸發農場畫面上的按鈕，不需要知道 FarmEvent 的參數
---  不會按任何 Robux 解鎖或解鎖田地的按鈕
--- ====================================================================
-AfkTab:CreateSection("每日小農場")
+AfkTab:CreateSection("悠閒釣魚")
 
 do
     local VIM = game:GetService("VirtualInputManager")
+    local RunService = game:GetService("RunService")
     local GuiService = game:GetService("GuiService")
 
-    local SEEDS = {"青菜", "蘿蔔", "番茄", "玉米", "向日葵"}
+    local DEPTHS = {"淺水", "中水", "深水"}
+    local METHODS = {"空白鍵", "按鈕事件"}
 
-    local farmOn = false
-    local harvestOn, plantOn, waterOn, pestOn, sunOn = true, false, true, true, true
-    local closeAfter = true      -- 操作完，如果是腳本自己打開的畫面就關回去
-    local seedName = "玉米"
-    local farmInterval = 60      -- 每隔幾秒檢查一次
+    local fishOn = false
+    local depthName = "淺水"
+    local method = "空白鍵"
+    local margin = 0.08          -- 張力安全邊界：越大越保守（越早放線）
     local status = "--"
 
-    local function getPg()
-        return LocalPlayer:FindFirstChild("PlayerGui")
+    local cache = {}
+    local holding = false
+    local lastState, stateSince, lastAct, doneTries = "", tick(), 0, 0
+    local toggleHandle
+
+    local function has(t, s)
+        return t ~= nil and t:find(s, 1, true) ~= nil
+    end
+    local function valid(o)
+        return o ~= nil and o.Parent ~= nil
     end
 
-    -- 在介面裡找文字符合條件的 TextButton（只比對按鈕，不會碰到文字標籤）
-    local function findButton(root, pred)
-        for _, v in ipairs(root:GetDescendants()) do
-            if v:IsA("TextButton") and pred(v.Text) then
+    local function shown(obj)
+        local cur = obj
+        while cur do
+            if cur:IsA("GuiObject") and not cur.Visible then
+                return false
+            end
+            if cur:IsA("ScreenGui") then
+                return cur.Enabled
+            end
+            cur = cur.Parent
+        end
+        return false
+    end
+
+    local function getGui()
+        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+        return pg and pg:FindFirstChild("FishingGui")
+    end
+
+    local function findLabel(gui, pred)
+        for _, v in ipairs(gui:GetDescendants()) do
+            if v:IsA("TextLabel") and pred(v.Text) then
                 return v
             end
         end
     end
 
-    local function has(text, s)
-        return text:find(s, 1, true) ~= nil
+    -- 畫面中間那顆大按鈕（文字會隨階段改變）
+    local function getBtn(gui)
+        if valid(cache.btn) then
+            return cache.btn
+        end
+        for _, v in ipairs(gui:GetDescendants()) do
+            if v:IsA("TextButton") and v.Text ~= "✕" and v.Size.X.Offset > 200 then
+                cache.btn = v
+                return v
+            end
+        end
     end
 
-    -- 按下按鈕：優先觸發按鈕本身的點擊事件，不行再模擬點中心
-    local function press(btn)
-        if getconnections then
-            for _, sig in ipairs({btn.Activated, btn.MouseButton1Click}) do
-                local ok, conns = pcall(getconnections, sig)
-                if ok and conns and #conns > 0 then
-                    for _, c in ipairs(conns) do
-                        pcall(function() c:Fire() end)
-                    end
-                    return true
+    -- 上方提示文字（🎣 按住按鈕蓄力… / ❗ 上鉤了！… / 🐟 魚在衝刺！… 等）
+    local PHASE_WORDS = {"蓄力", "拋竿", "等待魚", "上鉤", "用力", "收線", "發力", "衝刺", "收穫", "嚇跑"}
+    local function isPhase(t)
+        if t == "" or has(t, "空白鍵") then
+            return false
+        end
+        for _, w in ipairs(PHASE_WORDS) do
+            if has(t, w) then
+                return true
+            end
+        end
+        return false
+    end
+    local function phaseText(gui)
+        local l = cache.lbl
+        if valid(l) and isPhase(l.Text) then
+            return l.Text
+        end
+        l = findLabel(gui, isPhase)
+        cache.lbl = l
+        return l and l.Text or nil
+    end
+
+    -- 在一條進度條裡找那個 5px 寬的白色指針
+    local function findMarker(bar)
+        for _, c in ipairs(bar:GetChildren()) do
+            if c:IsA("Frame") and c.Size.X.Scale == 0 and c.Size.X.Offset == 5 then
+                return c
+            end
+        end
+    end
+
+    -- 拋竿距離條（淺水/中水/深水）
+    local function castInfo(gui)
+        local c = cache.cast
+        if not (c and c.name == depthName and valid(c.marker) and valid(c.zone)) then
+            local lbl = findLabel(gui, function(t) return t == depthName end)
+            local zone = lbl and lbl.Parent
+            local bar = zone and zone.Parent
+            local marker = bar and findMarker(bar)
+            if not marker then
+                cache.cast = nil
+                return
+            end
+            c = {name = depthName, marker = marker, zone = zone}
+            cache.cast = c
+        end
+        local zs, zw = c.zone.Position.X.Scale, c.zone.Size.X.Scale
+        return c.marker.Position.X.Scale, zs + zw * 0.2, zs + zw * 0.8
+    end
+
+    -- 張力條：指針位置 + 黃色區域起點
+    local function tensionInfo(gui)
+        local t = cache.tension
+        if not (t and valid(t.marker) and valid(t.bar)) then
+            local lbl = findLabel(gui, function(s) return has(s, "TENSION") end)
+            local bar = lbl and lbl.Parent
+            local marker = bar and findMarker(bar)
+            if not marker then
+                cache.tension = nil
+                return
+            end
+            t = {marker = marker, bar = bar}
+            cache.tension = t
+        end
+        local yellow = 0.6
+        for _, c in ipairs(t.bar:GetChildren()) do
+            if c:IsA("Frame") and c.Size.X.Scale > 0.05 then
+                local col = c.BackgroundColor3
+                if col.R > 0.85 and col.G > 0.7 and col.B < 0.45 then
+                    yellow = c.Position.X.Scale
                 end
             end
         end
-        local gui = btn:FindFirstAncestorWhichIsA("ScreenGui")
+        return t.marker.Position.X.Scale, yellow
+    end
+
+    -- 收線進度（藍色「拉近距離」條）
+    local function progress(gui)
+        local d = cache.dist
+        if not (d and valid(d)) then
+            local lbl = findLabel(gui, function(s) return has(s, "拉近距離") end)
+            local bar = lbl and lbl.Parent
+            d = bar and bar:FindFirstChildWhichIsA("Frame")
+            cache.dist = d
+        end
+        return d and d.Size.X.Scale or nil
+    end
+
+    -- 今日釣獲 x / y
+    local function dailyCount(gui)
+        local l = cache.daily
+        if not valid(l) then
+            l = findLabel(gui, function(s) return has(s, "今日釣獲") end)
+            cache.daily = l
+        end
+        if l then
+            local a, b = l.Text:match("(%d+)%s*/%s*(%d+)")
+            if a then
+                return tonumber(a), tonumber(b)
+            end
+        end
+    end
+
+    -- ===== 輸入 =====
+    local function center(btn)
+        local g = btn:FindFirstAncestorWhichIsA("ScreenGui")
         local inset = Vector2.new(0, 0)
-        if gui and not gui.IgnoreGuiInset then
+        if g and not g.IgnoreGuiInset then
             inset = GuiService:GetGuiInset()
         end
-        local pos = btn.AbsolutePosition + btn.AbsoluteSize / 2 + inset
-        return pcall(function()
-            VIM:SendMouseButtonEvent(pos.X, pos.Y, 0, true, game, 0)
-            VIM:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 0)
+        return btn.AbsolutePosition + btn.AbsoluteSize / 2 + inset
+    end
+
+    local function fireSignal(btn, names)
+        if not getconnections then
+            return false
+        end
+        for _, n in ipairs(names) do
+            local ok, conns = pcall(getconnections, btn[n])
+            if ok and conns and #conns > 0 then
+                for _, c in ipairs(conns) do
+                    pcall(function() c:Fire() end)
+                end
+                return true
+            end
+        end
+        return false
+    end
+
+    local function setHold(down)
+        if holding == down then
+            return
+        end
+        holding = down
+        local btn = cache.btn
+        if method == "空白鍵" or not valid(btn) then
+            VIM:SendKeyEvent(down, Enum.KeyCode.Space, false, game)
+        else
+            if not fireSignal(btn, {down and "MouseButton1Down" or "MouseButton1Up"}) then
+                local p = center(btn)
+                VIM:SendMouseButtonEvent(p.X, p.Y, 0, down, game, 0)
+            end
+        end
+    end
+
+    local function tap()
+        setHold(true)
+        task.delay(0.08, function()
+            setHold(false)
         end)
     end
 
-    -- 讀出所有田的狀態（顯示用）
-    local function summary(gui)
-        local grow, empty, locked = 0, 0, 0
-        local scroll = gui:FindFirstChildWhichIsA("ScrollingFrame", true)
-        if not scroll then
-            return "找不到田"
+    local function click(btn)
+        if not fireSignal(btn, {"Activated", "MouseButton1Click"}) then
+            local p = center(btn)
+            VIM:SendMouseButtonEvent(p.X, p.Y, 0, true, game, 0)
+            VIM:SendMouseButtonEvent(p.X, p.Y, 0, false, game, 0)
         end
-        for _, plot in ipairs(scroll:GetChildren()) do
-            if plot:IsA("TextButton") then
-                local hasTimer, isLocked = false, false
-                for _, l in ipairs(plot:GetChildren()) do
-                    if l:IsA("TextLabel") then
-                        if has(l.Text, "⏳") then hasTimer = true end
-                        if has(l.Text, "🔒") then isLocked = true end
-                    end
-                end
-                if isLocked then
-                    locked += 1
-                elseif hasTimer then
-                    grow += 1
-                else
-                    empty += 1
-                end
-            end
-        end
-        return string.format("生長中 %d｜其他 %d｜未解鎖 %d", grow, empty, locked)
     end
 
-    local function cycle()
-        local pg = getPg()
-        local gui = pg and pg:FindFirstChild("FarmGui")
-        local main = gui and gui:FindFirstChildOfClass("Frame")
-        if not main then
-            status = "找不到 FarmGui"
+    local function stopSelf(msg)
+        fishOn = false
+        setHold(false)
+        status = msg
+        if notify then
+            notify("自動釣魚", msg, 5)
+        end
+        if toggleHandle then
+            pcall(function() toggleHandle:Set(false) end)
+        end
+    end
+
+    -- ===== 主流程：依按鈕文字判斷目前階段 =====
+    local function step()
+        local gui = getGui()
+        local btn = gui and getBtn(gui)
+        if not btn or not shown(btn) then
+            setHold(false)
+            status = "請先打開釣魚畫面"
             return
         end
 
-        -- 農場畫面沒打開就先按 FarmHud 的「農場」按鈕打開
-        local openedByMe = false
-        if not main.Visible then
-            local hud = pg:FindFirstChild("FarmHud")
-            local openBtn = hud and hud:FindFirstChild("OpenFarm")
-            if not openBtn then
-                status = "找不到農場按鈕 OpenFarm"
+        local bt = btn.Text
+        local lt = phaseText(gui)
+        local now = tick()
+
+        local state
+        if has(bt, "按住蓄力") then state = "IDLE"
+        elseif has(bt, "放開拋竿") then state = "CHARGE"
+        elseif has(bt, "收回魚線") then state = "WAIT"
+        elseif has(bt, "收竿") then state = "BITE"
+        elseif has(bt, "按住收線") then state = "FIGHT"
+        elseif has(bt, "再釣") then state = "DONE"
+        elseif bt == "..." then state = "BUSY"
+        else state = "UNKNOWN" end
+
+        if state ~= lastState then
+            lastState, stateSince, lastAct, doneTries = state, now, 0, 0
+        end
+
+        -- 今日上限（只在要開始新的一輪時檢查）
+        if state == "IDLE" or state == "DONE" then
+            local used, cap = dailyCount(gui)
+            if used and cap and used >= cap then
+                stopSelf("今日釣獲已達上限 " .. used .. " / " .. cap)
                 return
             end
-            press(openBtn)
-            local t0 = tick()
-            while tick() - t0 < 3 and not main.Visible do
-                task.wait(0.1)
-            end
-            if not main.Visible then
-                status = "農場畫面打不開"
-                return
-            end
-            openedByMe = true
-            task.wait(0.5)
         end
 
-        local did = {}
-
-        -- 有蟲就除蟲（要花 30🌸，但不除會虧更多）
-        if pestOn then
-            local b = findButton(gui, function(t) return has(t, "🐛") and not has(t, "沒蟲") end)
-            if b then
-                press(b)
-                table.insert(did, "除蟲")
-                task.wait(0.4)
+        if state == "IDLE" then
+            if not holding and now - lastAct > 0.3 then
+                setHold(true)
+                lastAct = now
+            elseif holding and now - lastAct > 1.5 then
+                setHold(false)      -- 按住沒有生效，放開重來
+                lastAct = now
             end
-        end
+            status = "準備拋竿"
 
-        -- 每日日照（今日已用的就跳過）
-        if sunOn then
-            local b = findButton(gui, function(t) return has(t, "☀") and not has(t, "已用") end)
-            if b then
-                press(b)
-                table.insert(did, "日照")
-                task.wait(0.4)
+        elseif state == "CHARGE" then
+            local x, lo, hi = castInfo(gui)
+            if holding then
+                if x and x >= lo and x <= hi then
+                    setHold(false)
+                elseif now - stateSince > 4 then
+                    setHold(false)
+                end
             end
-        end
+            status = string.format("蓄力中 %.2f（目標 %s %.2f~%.2f）", x or -1, depthName, lo or 0, hi or 0)
 
-        -- 全部收成（遊戲只會收成熟的）
-        if harvestOn then
-            local b = findButton(gui, function(t) return has(t, "全部收成") end)
-            if b then
-                press(b)
-                table.insert(did, "收成")
-                task.wait(0.5)
+        elseif state == "BUSY" then
+            setHold(false)
+            status = "處理中…"
+
+        elseif state == "WAIT" then
+            setHold(false)
+            status = "等待魚上鉤…"
+
+        elseif state == "BITE" then
+            if now - lastAct > 0.8 then
+                tap()
+                lastAct = now
             end
-        end
+            status = "上鉤！收竿"
 
-        -- 重新種植：先選種子，再按全部種植（會花🌸買種子）
-        if plantOn then
-            local seed = findButton(gui, function(t) return has(t, seedName) and has(t, "🌸") end)
-            local plantBtn = findButton(gui, function(t) return has(t, "全部種植") end)
-            if seed and plantBtn then
-                press(seed)
-                task.wait(0.4)
-                press(plantBtn)
-                table.insert(did, "種植" .. seedName)
-                task.wait(0.5)
+        elseif state == "FIGHT" then
+            local x, yellow = tensionInfo(gui)
+            local upper = (yellow or 0.6) - margin
+            local lower = math.max(0.05, upper - 0.2)
+            if has(lt, "衝刺") then
+                setHold(false)
+            elseif has(lt, "發力") then
+                if x and x > lower * 0.5 then
+                    setHold(false)
+                else
+                    setHold(true)
+                end
+            elseif x == nil then
+                setHold(true)
+            elseif x >= upper then
+                setHold(false)
+            elseif x <= lower then
+                setHold(true)
             end
-        end
+            local p = progress(gui)
+            status = string.format("收線中 張力 %.2f（上限 %.2f）進度 %s%s",
+                x or -1, upper, p and string.format("%.0f%%", p * 100) or "--",
+                holding and " 拉" or " 放")
 
-        -- 全部澆水
-        if waterOn then
-            local b = findButton(gui, function(t) return has(t, "全部澆水") end)
-            if b then
-                press(b)
-                table.insert(did, "澆水")
-                task.wait(0.4)
+        elseif state == "DONE" then
+            setHold(false)
+            if now - stateSince > 1.5 and now - lastAct > 2 then
+                doneTries += 1
+                if doneTries % 2 == 1 then
+                    click(btn)
+                else
+                    fireSignal(btn, {"MouseButton1Down"})
+                    fireSignal(btn, {"MouseButton1Up"})
+                end
+                lastAct = now
             end
-        end
+            status = "釣到了，準備再釣"
 
-        status = summary(gui) .. "｜" .. (#did > 0 and table.concat(did, "、") or "沒有動作")
-
-        -- 只關回自己打開的畫面（用 X 按鈕）
-        if openedByMe and closeAfter then
-            local x = findButton(gui, function(t) return t == "X" end)
-            if x then
-                press(x)
-            end
+        else
+            setHold(false)
+            status = "未知按鈕文字：" .. tostring(bt)
         end
     end
 
-    task.spawn(function()
-        while true do
-            if farmOn then
-                local ok, err = pcall(cycle)
-                if not ok then
-                    status = "錯誤：" .. tostring(err)
-                    warn("[卡依腳本] 小農場錯誤：" .. tostring(err))
-                end
-                local waited = 0
-                while farmOn and waited < farmInterval do
-                    task.wait(0.5)
-                    waited += 0.5
-                end
-            else
-                task.wait(0.5)
-            end
+    local conn = RunService.Heartbeat:Connect(function()
+        if not fishOn then
+            return
+        end
+        local ok, err = pcall(step)
+        if not ok then
+            status = "錯誤：" .. tostring(err)
         end
     end)
 
-    AfkTab:CreateToggle({
-        Name = "自動小農場",
+    toggleHandle = AfkTab:CreateToggle({
+        Name = "自動釣魚",
         CurrentValue = false,
         Callback = function(v)
-            farmOn = v
+            fishOn = v
             if v then
                 status = "啟動中…"
+            else
+                setHold(false)
             end
         end,
     })
-    -- 不存檔：避免下次載入設定時一啟動就自己開始花🌸
+    -- 不存檔：避免下次載入設定時一啟動就自己開始釣
 
-    AfkTab:CreateToggle({
-        Name = "自動收成", CurrentValue = true,
-        Callback = function(v) harvestOn = v end,
-    })
-    AfkTab:CreateToggle({
-        Name = "自動重新種植（會花🌸）", CurrentValue = false,
-        Callback = function(v) plantOn = v end,
-    })
-
-    local dSeed = AfkTab:CreateDropdown({
-        Name = "種植的種子",
-        Options = SEEDS,
-        CurrentOption = {seedName},
+    local dDepth = AfkTab:CreateDropdown({
+        Name = "拋竿深度（越深魚越稀有但越難）",
+        Options = DEPTHS,
+        CurrentOption = {depthName},
         Callback = function(opt)
             local s = type(opt) == "table" and opt[1] or opt
-            for _, n in ipairs(SEEDS) do
+            for _, n in ipairs(DEPTHS) do
                 if n == s then
-                    seedName = s
+                    depthName = s
                 end
             end
         end,
     })
-    regDropdown("farmSeed", dSeed, function() return seedName end, function(v)
-        seedName = v
+    regDropdown("fishDepth", dDepth, function() return depthName end, function(v)
+        depthName = v
     end)
 
-    AfkTab:CreateToggle({
-        Name = "自動澆水", CurrentValue = true,
-        Callback = function(v) waterOn = v end,
-    })
-    AfkTab:CreateToggle({
-        Name = "自動除蟲（每次 30🌸）", CurrentValue = true,
-        Callback = function(v) pestOn = v end,
-    })
-    AfkTab:CreateToggle({
-        Name = "自動每日日照", CurrentValue = true,
-        Callback = function(v) sunOn = v end,
-    })
-    AfkTab:CreateToggle({
-        Name = "操作完把農場畫面關回去", CurrentValue = true,
-        Callback = function(v) closeAfter = v end,
-    })
-
-    local iFarmInterval = AfkTab:CreateInput({
-        Name = "農場檢查間隔（秒）",
-        PlaceholderText = "預設 60",
-        Callback = function(text)
-            local n = tonumber(text)
-            if n and n >= 5 then
-                farmInterval = n
-                notify("已設定", "每 " .. n .. " 秒檢查一次農場")
-            else
-                notify("輸入錯誤", "請輸入 5 以上的數字")
+    local dMethod = AfkTab:CreateDropdown({
+        Name = "操作方式（空白鍵沒反應就換按鈕事件）",
+        Options = METHODS,
+        CurrentOption = {method},
+        Callback = function(opt)
+            local s = type(opt) == "table" and opt[1] or opt
+            for _, n in ipairs(METHODS) do
+                if n == s then
+                    setHold(false)
+                    method = s
+                end
             end
         end,
     })
-    regNumber("farmInterval", iFarmInterval, function() return farmInterval end, function(v)
-        farmInterval = v
+    regDropdown("fishMethod", dMethod, function() return method end, function(v)
+        method = v
     end)
 
-    -- 顯示目前狀態（點一下可以複製）
+    local iMargin = AfkTab:CreateInput({
+        Name = "張力安全邊界（0.02~0.3，越大越保守）",
+        PlaceholderText = "預設 0.08",
+        Callback = function(text)
+            local n = tonumber(text)
+            if n and n >= 0.02 and n <= 0.3 then
+                margin = n
+                notify("已設定", "張力邊界 " .. n)
+            else
+                notify("輸入錯誤", "請輸入 0.02 到 0.3 的數字")
+            end
+        end,
+    })
+    regNumber("fishMargin", iMargin, function() return margin end, function(v)
+        margin = v
+    end)
+
     local statusBtn = AfkTab:CreateButton({
-        Name = "農場狀態  --",
+        Name = "釣魚狀態  --",
         Callback = function()
             if setclipboard then
                 pcall(setclipboard, status)
             end
-            notify("農場狀態", status, 4)
+            notify("釣魚狀態", status, 4)
         end,
     })
     task.spawn(function()
         while true do
-            statusBtn:SetName("農場狀態  " .. status)
-            task.wait(0.5)
+            statusBtn:SetName("釣魚狀態  " .. status)
+            task.wait(0.3)
         end
     end)
 
     UI:OnClose(function()
-        farmOn = false
+        fishOn = false
+        setHold(false)
+        conn:Disconnect()
     end)
 end
-
--- ===== 設定 =====
-AfkTab:CreateSection("設定")
-
-AfkTab:CreateButton({
-    Name = "儲存設定",
-    Callback = function()
-        saveConfig()
-    end,
-})
-
-AfkTab:CreateButton({
-    Name = "載入設定",
-    Callback = function()
-        loadConfig(false)
-    end,
-})
-
-AfkTab:CreateButton({
-    Name = "隱藏視窗（會出現可拖曳的小按鈕）",
-    Callback = function()
-        UI:SetVisibility(false)
-    end,
-})
-
--- 對外：讓主腳本的按鈕可以重新叫出這個視窗
-local alive = true
-UI:OnClose(function()
-    alive = false
-end)
-env.KaiSakuraAFK = {
-    alive = function() return alive end,
-    show = function() UI:SetVisibility(true) end,
-}
-
--- 啟動時自動套用上次存的設定
-loadConfig(true)
-
-notify("櫻 mini game AFK", "載入完成", 3)
 
 -- ===== 設定 =====
 AfkTab:CreateSection("設定")
