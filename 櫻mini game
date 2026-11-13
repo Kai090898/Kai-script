@@ -2824,6 +2824,395 @@ do
         conn:Disconnect()
     end)
 end
+-- ====================================================================
+--  21 點 Blackjack（貼進「櫻mini game」，放在其他區段後面、
+--  「-- ===== 設定 =====」的前面）
+--
+--  做法：只讀取畫面上的牌和文字，再用「要牌 / 停牌」按鈕操作
+--  - 狀態按鈕會一直顯示建議（要牌或停牌），不開自動也能當提示用
+--  - 「自動要牌/停牌」：輪到你時自動按建議
+--  - 「自動開始下一局」：結算後自動選下注金額並按開始（有局數和餘額上限）
+--  - 策略是只有「要牌 / 停牌」可選時的基本策略。注意這個遊戲平手算莊家贏，
+--    長期期望值還是偏負，所以預設只玩 20 局就停
+-- ====================================================================
+AfkTab:CreateSection("21 點 Blackjack")
+
+do
+    local VIM = game:GetService("VirtualInputManager")
+    local GuiService = game:GetService("GuiService")
+
+    local autoPlay, autoStart = false, false
+    local betChoice = 100
+    local maxRounds = 20
+    local stopBelow = 0
+    local rounds = 0
+    local status = "--"
+    local logBuf = {}
+    local runStart = tick()
+    local startToggle
+
+    local function has(t, s)
+        return t ~= nil and t:find(s, 1, true) ~= nil
+    end
+    local function shown(obj)
+        local cur = obj
+        while cur do
+            if cur:IsA("GuiObject") and not cur.Visible then return false end
+            if cur:IsA("ScreenGui") then return cur.Enabled end
+            cur = cur.Parent
+        end
+        return false
+    end
+    local function blog(s)
+        table.insert(logBuf, string.format("[%.1f] %s", tick() - runStart, s))
+        if #logBuf > 300 then table.remove(logBuf, 1) end
+    end
+    local function commas(n)
+        local s = tostring(math.floor(n))
+        local r = s:reverse():gsub("(%d%d%d)", "%1,"):reverse()
+        return (r:gsub("^,", ""))
+    end
+
+    local function click(btn)
+        if getconnections then
+            for _, sig in ipairs({btn.Activated, btn.MouseButton1Click}) do
+                local ok, conns = pcall(getconnections, sig)
+                if ok and conns and #conns > 0 then
+                    for _, c in ipairs(conns) do
+                        pcall(function() c:Fire() end)
+                    end
+                    return
+                end
+            end
+        end
+        local g = btn:FindFirstAncestorWhichIsA("ScreenGui")
+        local inset = Vector2.new(0, 0)
+        if g and not g.IgnoreGuiInset then
+            inset = GuiService:GetGuiInset()
+        end
+        local p = btn.AbsolutePosition + btn.AbsoluteSize / 2 + inset
+        VIM:SendMouseButtonEvent(p.X, p.Y, 0, true, game, 0)
+        VIM:SendMouseButtonEvent(p.X, p.Y, 0, false, game, 0)
+    end
+
+    local function getMain()
+        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+        local g = pg and pg:FindFirstChild("BlackjackGui")
+        local m = g and g:FindFirstChild("Main")
+        return g, m
+    end
+
+    local function findButton(main, pred)
+        for _, v in ipairs(main:GetChildren()) do
+            if v:IsA("TextButton") and pred(v.Text) then
+                return v
+            end
+        end
+    end
+
+    -- ===== 讀牌 =====
+    local SUITS = {["♠"] = true, ["♥"] = true, ["♦"] = true, ["♣"] = true}
+    local function cardRank(card)
+        for _, l in ipairs(card:GetDescendants()) do
+            if l:IsA("TextLabel") then
+                local t = l.Text
+                if t ~= "" and not SUITS[t] and t ~= "🌸" then
+                    return t
+                end
+            end
+        end
+    end
+    local function cardValue(r)
+        if r == "A" then return 11 end
+        if r == "J" or r == "Q" or r == "K" or r == "T" then return 10 end
+        return tonumber(r)
+    end
+    local function ranksOf(container)
+        local list = {}
+        for _, c in ipairs(container:GetChildren()) do
+            if c:IsA("Frame") then
+                local r = cardRank(c)
+                if r then table.insert(list, r) end
+            end
+        end
+        return list
+    end
+    local function evalHand(ranks)
+        local total, aces = 0, 0
+        for _, r in ipairs(ranks) do
+            local v = cardValue(r) or 0
+            if v == 11 then
+                aces += 1
+                total += 1
+            else
+                total += v
+            end
+        end
+        local soft = false
+        if aces > 0 and total + 10 <= 21 then
+            total += 10
+            soft = true
+        end
+        return total, soft
+    end
+
+    -- 找「莊家 ·」「你 ·」標籤後面的牌區，以及牌區後面的狀態文字
+    local function sectionCards(main, prefix)
+        local kids = main:GetChildren()
+        for i, c in ipairs(kids) do
+            if c:IsA("TextLabel") and c.Text:sub(1, #prefix) == prefix and has(c.Text, "·") then
+                for j = i + 1, #kids do
+                    if kids[j]:IsA("Frame") then
+                        return kids[j], c, j
+                    end
+                end
+            end
+        end
+    end
+    local function labelAfter(main, container)
+        local kids = main:GetChildren()
+        local after = false
+        for _, c in ipairs(kids) do
+            if after and c:IsA("TextLabel") then
+                return c
+            end
+            if c == container then after = true end
+        end
+    end
+    local function balanceOf(main)
+        for _, d in ipairs(main:GetDescendants()) do
+            if d:IsA("TextLabel") then
+                local n = d.Text:match("^🌸%s*([%d,]+)$")
+                if n then
+                    return tonumber((n:gsub(",", "")))
+                end
+            end
+        end
+    end
+
+    -- 只有「要牌 / 停牌」時的基本策略（莊家 17 停牌）
+    local function decide(total, soft, up)
+        if soft then
+            if total <= 17 then return "HIT" end
+            if total == 18 then return up <= 8 and "STAND" or "HIT" end
+            return "STAND"
+        end
+        if total <= 11 then return "HIT" end
+        if total == 12 then return (up >= 4 and up <= 6) and "STAND" or "HIT" end
+        if total <= 16 then return up <= 6 and "STAND" or "HIT" end
+        return "STAND"
+    end
+
+    local lastKey, lastAct, lastStart = "", 0, 0
+    local lastS, lastSChange, lastBal = nil, tick(), nil
+    local roundLogged = true
+
+    local function stopAuto(msg)
+        autoStart = false
+        autoPlay = false
+        status = msg
+        blog("停止：" .. msg)
+        if notify then
+            notify("21 點", msg, 5)
+        end
+        if startToggle then
+            pcall(function() startToggle:Set(false) end)
+        end
+    end
+
+    local function step()
+        local g, main = getMain()
+        if not main or not g.Enabled or not shown(main) then
+            status = "請先打開 21 點畫面"
+            return
+        end
+        local dCont = sectionCards(main, "莊家")
+        local pCont, pLbl = sectionCards(main, "你")
+        if not dCont or not pCont then
+            status = "找不到牌桌"
+            return
+        end
+        local sLbl = labelAfter(main, dCont)
+        local sText = sLbl and sLbl.Text or ""
+        local now = tick()
+
+        local pr, dr = ranksOf(pCont), ranksOf(dCont)
+        local total, soft = evalHand(pr)
+        local labelTotal = tonumber((pLbl.Text:match("(%d+)")))
+        if labelTotal and #pr > 0 and labelTotal ~= total then
+            blog(string.format("警告：算出 %d，畫面顯示 %d（牌=%s）", total, labelTotal, table.concat(pr, ",")))
+            total, soft = labelTotal, false
+        end
+        local up = dr[1] and cardValue(dr[1])
+        local turn = has(sText, "要牌還是停牌")
+        local advice = (turn and #pr >= 2 and up) and decide(total, soft, up) or nil
+        local bal = balanceOf(main)
+
+        if sText ~= lastS then
+            blog("狀態文字：" .. sText)
+            lastS, lastSChange = sText, now
+            roundLogged = false
+        end
+        if bal ~= lastBal then
+            blog("餘額 " .. (bal and commas(bal) or "?"))
+            lastBal = bal
+        end
+        if not turn and not roundLogged and now - lastSChange > 1 and #pr > 0 then
+            blog(string.format("這一局：你=%s（%d）莊家=%s", table.concat(pr, ","), total, table.concat(dr, ",")))
+            roundLogged = true
+        end
+
+        if #pr > 0 then
+            status = string.format("你 %d%s vs 莊家 %s｜%s｜局數 %d/%d｜餘額 %s",
+                total, soft and "（軟）" or "", dr[1] or "?",
+                advice and ("建議：" .. (advice == "HIT" and "要牌" or "停牌")) or sText,
+                rounds, maxRounds, bal and commas(bal) or "?")
+        else
+            status = string.format("%s｜局數 %d/%d｜餘額 %s", sText ~= "" and sText or "等待開局", rounds, maxRounds, bal and commas(bal) or "?")
+        end
+
+        -- 自動要牌 / 停牌
+        if autoPlay and turn and advice and now - lastAct > 0.8 then
+            local key = #pr .. ":" .. total
+            if key ~= lastKey or now - lastAct > 3 then
+                local b = findButton(main, function(t)
+                    return has(t, advice == "HIT" and "要牌" or "停牌")
+                end)
+                if b and shown(b) then
+                    click(b)
+                    lastKey, lastAct = key, now
+                    blog(string.format("%d%s vs %s → %s", total, soft and "軟" or "", dr[1] or "?", advice))
+                end
+            end
+        end
+
+        -- 自動開始下一局
+        if autoStart and not turn and now - lastSChange > 1.2 and now - lastStart > 3 then
+            if rounds >= maxRounds then
+                stopAuto("已達最大局數 " .. maxRounds)
+            elseif bal and (bal < stopBelow or bal < betChoice) then
+                stopAuto("餘額 " .. commas(bal) .. " 低於停止線或下注金額")
+            else
+                local startBtn = findButton(main, function(t) return has(t, "開始遊戲") end)
+                if startBtn and shown(startBtn) then
+                    if not has(startBtn.Text, commas(betChoice)) then
+                        local chip = findButton(main, function(t)
+                            return (t:gsub(",", "")) == tostring(betChoice)
+                        end)
+                        if chip then
+                            click(chip)
+                            lastStart = now - 2.4
+                        else
+                            stopAuto("找不到下注金額 " .. betChoice .. " 的籌碼")
+                        end
+                    else
+                        click(startBtn)
+                        rounds += 1
+                        lastStart = now
+                        blog("開始第 " .. rounds .. " 局，下注 " .. betChoice)
+                    end
+                end
+            end
+        end
+    end
+
+    task.spawn(function()
+        while true do
+            task.wait(0.25)
+            local ok, err = pcall(step)
+            if not ok then
+                status = "錯誤：" .. tostring(err)
+            end
+        end
+    end)
+
+    -- ===== 介面 =====
+    AfkTab:CreateToggle({
+        Name = "自動要牌/停牌（按建議）", CurrentValue = false,
+        Callback = function(v) autoPlay = v end,
+    })
+    -- 不存檔：避免下次載入設定時自己開始花🌸
+
+    startToggle = AfkTab:CreateToggle({
+        Name = "自動開始下一局（會花🌸）", CurrentValue = false,
+        Callback = function(v)
+            autoStart = v
+            if v then
+                rounds = 0
+                runStart = tick()
+            end
+        end,
+    })
+
+    local BETS = {"100", "300", "500", "1000", "2000", "3000"}
+    local dBet = AfkTab:CreateDropdown({
+        Name = "每局下注金額",
+        Options = BETS,
+        CurrentOption = {tostring(betChoice)},
+        Callback = function(opt)
+            local s = type(opt) == "table" and opt[1] or opt
+            local n = tonumber(s)
+            if n then betChoice = n end
+        end,
+    })
+    regDropdown("bjBet", dBet, function() return tostring(betChoice) end, function(v)
+        betChoice = tonumber(v) or betChoice
+    end)
+
+    local iRounds = AfkTab:CreateInput({
+        Name = "最多玩幾局（預設 20）",
+        PlaceholderText = "例如 20",
+        Callback = function(text)
+            local n = tonumber(text)
+            if n and n >= 1 then
+                maxRounds = math.floor(n)
+                notify("已設定", "最多 " .. maxRounds .. " 局")
+            else
+                notify("輸入錯誤", "請輸入 1 以上的整數")
+            end
+        end,
+    })
+    regNumber("bjRounds", iRounds, function() return maxRounds end, function(v)
+        maxRounds = v
+    end)
+
+    local iStop = AfkTab:CreateInput({
+        Name = "餘額低於多少就停止（預設 0）",
+        PlaceholderText = "例如 1000",
+        Callback = function(text)
+            local n = tonumber((text:gsub(",", "")))
+            if n and n >= 0 then
+                stopBelow = n
+                notify("已設定", "餘額低於 " .. commas(n) .. " 停止")
+            else
+                notify("輸入錯誤", "請輸入數字")
+            end
+        end,
+    })
+    regNumber("bjStopBelow", iStop, function() return stopBelow end, function(v)
+        stopBelow = v
+    end)
+
+    local statusBtn = AfkTab:CreateButton({
+        Name = "21點狀態  --",
+        Callback = function()
+            if setclipboard then
+                pcall(setclipboard, table.concat(logBuf, "\n"))
+            end
+            notify("21 點", status, 4)
+        end,
+    })
+    task.spawn(function()
+        while true do
+            statusBtn:SetName("21點狀態  " .. status)
+            task.wait(0.3)
+        end
+    end)
+
+    UI:OnClose(function()
+        autoPlay, autoStart = false, false
+    end)
+end
 
 -- ===== 設定 =====
 AfkTab:CreateSection("設定")
