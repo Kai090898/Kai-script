@@ -952,10 +952,7 @@ local EN = {
     ["遊戲"] = "Games",
     ["小遊戲"] = "Mini Games",
     ["拳擊模擬器"] = "Boxing Simulator",
-    ["自動抽蛋"] = "Auto Hatch",
-    ["抽蛋方式"] = "Hatch Mode",
-    ["抽蛋間隔（秒）"] = "Hatch Interval (sec)",
-    ["預設 2，要等抽蛋動畫跑完"] = "Default 2, wait for the hatch animation",
+    ["拳擊模擬器 AFK"] = "Boxing Simulator AFK",
     ["櫻mini game afk"] = "Sakura mini game afk",
     ["翻機器人"] = "Robot Hunt",
     ["自動翻機器人（到有結果為止）"] = "Auto Flip Robots (until a result)",
@@ -1930,7 +1927,31 @@ end
 do
     -- 「櫻mini game」檔案的 raw 網址（內容是 sakura_afk.lua）
     local SAKURA_AFK_URL = "https://raw.githubusercontent.com/Kai090898/Kai-slap-battles-script/refs/heads/main/%E6%AB%BBmini%20game"
+    -- 「拳擊模擬器」檔案的 raw 網址（獨立的拳擊模擬器 AFK 介面）
+    local PUNCH_SIM_URL = "https://raw.githubusercontent.com/Kai090898/Kai-script/refs/heads/main/%E6%8B%B3%E6%93%8A%E6%A8%A1%E6%93%AC%E5%99%A8"
     local loading = false
+
+    -- 下載並執行另一個腳本（會開成獨立的新視窗）
+    local function loadExternal(url)
+        if loading then
+            return
+        end
+        loading = true
+        task.spawn(function()
+            local ok, err = pcall(function()
+                local src = game:HttpGet(url)
+                local fn, cerr = loadstring(src)
+                if not fn then
+                    error(cerr)
+                end
+                fn()
+            end)
+            loading = false
+            if not ok then
+                notify("載入失敗", tostring(err), 6)
+            end
+        end)
+    end
 
     local GameTab = Window:CreateTab("遊戲")
     GameTab:CreateSection("小遊戲")
@@ -1938,254 +1959,19 @@ do
     GameTab:CreateButton({
         Name = "櫻mini game afk",
         Callback = function()
-            if loading then
-                return
-            end
-            loading = true
-            task.spawn(function()
-                local ok, err = pcall(function()
-                    local src = game:HttpGet(SAKURA_AFK_URL)
-                    local fn, cerr = loadstring(src)
-                    if not fn then
-                        error(cerr)
-                    end
-                    fn()
-                end)
-                loading = false
-                if not ok then
-                    notify("載入失敗", tostring(err), 6)
-                end
-            end)
+            loadExternal(SAKURA_AFK_URL)
         end,
     })
 
-    -- ===== 拳擊模擬器：站在蛋旁邊，抽蛋視窗跳出來後自動按「Open」 =====
+    -- ===== 拳擊模擬器：開啟獨立的 AFK 視窗（再按一次會把視窗叫出來）=====
     GameTab:CreateSection("拳擊模擬器")
 
-    do
-        local hatchOn = false
-        local hatchMode = "Open"
-        local hatchDelay = 2      -- 同時也是「按下後等多久才開始跳過動畫」
-        local lastPress = 0
-        local lastClose = 0
-        local skipClicks = 0
-        local sawHidden = false   -- 按下之後，視窗有沒有消失過（代表抽蛋動畫跑過了）
-        local pressCount = 0
-        local statusText = "尚未偵測"
-        local alive = true
-
-        -- 這個物件和它所有上層是不是都顯示著
-        local function isShown(obj)
-            local cur = obj
-            while cur and not cur:IsA("PlayerGui") do
-                if cur:IsA("GuiObject") and not cur.Visible then
-                    return false
-                end
-                if cur:IsA("ScreenGui") and not cur.Enabled then
-                    return false
-                end
-                cur = cur.Parent
-            end
-            return true
-        end
-
-        -- 找抽蛋視窗裡的 Open / Open 3 按鈕
-        local function findHatchButton()
-            local pg = LocalPlayer:FindFirstChild("PlayerGui")
-            local popup = pg and pg:FindFirstChild("PetsPopup")
-            local frame = popup and popup:FindFirstChild("Frame")
-            if not frame then
-                return nil, nil, "找不到抽蛋視窗 PetsPopup"
-            end
-            local holder = frame:FindFirstChild(hatchMode == "Open 3" and "Open3" or "Open1")
-            if not holder then
-                return nil, nil, "視窗裡找不到 " .. (hatchMode == "Open 3" and "Open3" or "Open1")
-            end
-            if not isShown(holder) then
-                return nil, nil, "hidden"  -- 視窗暫時不見（抽蛋動畫中，或還沒站到蛋旁邊）
-            end
-            local btn = holder:IsA("GuiButton") and holder or holder:FindFirstChildWhichIsA("GuiButton", true)
-            return btn or holder, popup
-        end
-
-        -- 按下按鈕：優先觸發按鈕本身的點擊事件（不受畫面上其他視窗擋住的影響），
-        -- 不行再模擬點按鈕中心
-        local function press(target, gui)
-            if target:IsA("GuiButton") and getconnections then
-                for _, sig in ipairs({target.Activated, target.MouseButton1Click}) do
-                    local ok, conns = pcall(getconnections, sig)
-                    if ok and conns and #conns > 0 then
-                        for _, c in ipairs(conns) do
-                            pcall(function() c:Fire() end)
-                        end
-                        return true
-                    end
-                end
-            end
-            local inset = Vector2.new(0, 0)
-            if gui and gui:IsA("ScreenGui") and not gui.IgnoreGuiInset then
-                inset = game:GetService("GuiService"):GetGuiInset()
-            end
-            local pos = target.AbsolutePosition + target.AbsoluteSize / 2 + inset
-            return pcall(function()
-                VIM:SendMouseButtonEvent(pos.X, pos.Y, 0, true, game, 0)
-                VIM:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 0)
-            end)
-        end
-
-        -- 抽蛋動畫的介面是 PetOpenUI。動畫時間到了就先模擬點螢幕（跟手動點一樣），
-        -- 點了還是沒關，就強制關掉動畫並把被遊戲關掉的介面還原
-        local function closeAnimation()
-            local pg = LocalPlayer:FindFirstChild("PlayerGui")
-            if not pg then return 0 end
-            local ui = pg:FindFirstChild("PetOpenUI")
-            if not (ui and ui.Enabled) then
-                return 0  -- 動畫已經自己結束了
-            end
-
-            if skipClicks < 3 then
-                skipClicks += 1
-                local vp = workspace.CurrentCamera.ViewportSize
-                pcall(function()
-                    VIM:SendMouseButtonEvent(vp.X / 2, vp.Y / 2, 0, true, game, 0)
-                    VIM:SendMouseButtonEvent(vp.X / 2, vp.Y / 2, 0, false, game, 0)
-                end)
-                return 1
-            end
-
-            -- 強制關閉並還原
-            ui.Enabled = false
-            local black = pg:FindFirstChild("Black")
-            if black then black.Enabled = false end
-            for _, name in ipairs({"MainUi", "QuestDescription"}) do
-                local g = pg:FindFirstChild(name)
-                if g then g.Enabled = true end
-            end
-            local popup = pg:FindFirstChild("PetsPopup")
-            if popup then
-                popup.Enabled = true
-                local f = popup:FindFirstChild("Frame")
-                if f then f.Visible = true end
-            end
-            return 1
-        end
-
-        task.spawn(function()
-            while alive do
-                if hatchOn then
-                    local target, gui, reason = findHatchButton()
-                    if not target then
-                        if reason == "hidden" then
-                            if tick() - lastPress < 20 then
-                                -- 剛按完不久視窗就不見，是抽蛋動畫
-                                sawHidden = true
-                                if tick() - lastPress >= hatchDelay and tick() - lastClose >= 0.5 then
-                                    lastClose = tick()
-                                    local n = closeAnimation()
-                                    statusText = n > 0 and "動畫結束，正在關閉動畫…" or "抽蛋動畫中，等視窗回來…"
-                                else
-                                    statusText = "抽蛋動畫中，等視窗回來…"
-                                end
-                            else
-                                statusText = "視窗沒有顯示，請站到蛋旁邊"
-                            end
-                        else
-                            statusText = reason or "找不到按鈕"
-                        end
-                    else
-                        -- 視窗在動畫之後回來了，只要稍等一下就能再按；沒消失過就照間隔
-                        local need = sawHidden and 0.6 or hatchDelay
-                        if tick() - lastPress >= need then
-                            lastPress = tick()
-                            sawHidden = false
-                            pressCount += 1
-                            skipClicks = 0
-                            press(target, gui)
-                            statusText = "已按下 " .. hatchMode
-                        else
-                            statusText = "等待下一次按下…"
-                        end
-                    end
-                    task.wait(0.2)
-                else
-                    task.wait(0.4)
-                end
-            end
-        end)
-
-        local tHatch = GameTab:CreateToggle({
-            Name = "自動抽蛋",
-            CurrentValue = false,
-            Callback = function(v)
-                hatchOn = v
-                if v then
-                    pressCount = 0
-                    lastPress = 0
-                    skipClicks = 0
-                end
-            end,
-        })
-        -- 不存檔：避免下次載入設定時一啟動就自己開始抽
-
-        local dHatchMode = GameTab:CreateDropdown({
-            Name = "抽蛋方式",
-            Options = {"Open", "Open 3"},
-            CurrentOption = {hatchMode},
-            Callback = function(opt)
-                local m = type(opt) == "table" and opt[1] or opt
-                if m == "Open" or m == "Open 3" then
-                    hatchMode = m
-                end
-            end,
-        })
-        regDropdown("hatchMode", dHatchMode, function() return hatchMode end, function(v)
-            hatchMode = v
-        end)
-
-        local iHatchDelay = GameTab:CreateInput({
-            Name = "抽蛋間隔（秒）",
-            PlaceholderText = "預設 2，要等抽蛋動畫跑完",
-            Callback = function(text)
-                local n = tonumber(text)
-                if n and n >= 0.2 then
-                    hatchDelay = n
-                    notify("已設定", "抽蛋間隔 = " .. n .. " 秒")
-                else
-                    notify("輸入錯誤", "請輸入 0.2 以上的數字")
-                end
-            end,
-        })
-        regNumber("hatchDelay", iHatchDelay, function() return hatchDelay end, function(v)
-            hatchDelay = v
-        end)
-
-        -- 顯示目前狀態和已經按了幾次（點一下可以複製）
-        local n = #langItems
-        local statusBtn = GameTab:CreateButton({
-            Name = "抽蛋狀態  --",
-            Callback = function()
-                if setclipboard then
-                    pcall(setclipboard, statusText)
-                end
-                notify("抽蛋狀態", statusText, 4)
-            end,
-        })
-        while #langItems > n do
-            table.remove(langItems)
-        end
-        task.spawn(function()
-            while alive do
-                statusBtn:SetName((useEnglish and "Hatch  " or "抽蛋狀態  ") .. statusText
-                    .. "（" .. pressCount .. "）")
-                task.wait(0.4)
-            end
-        end)
-
-        UI:OnClose(function()
-            alive = false
-            hatchOn = false
-        end)
-    end
+    GameTab:CreateButton({
+        Name = "拳擊模擬器 AFK",
+        Callback = function()
+            loadExternal(PUNCH_SIM_URL)
+        end,
+    })
 end
 
 -- 其他
