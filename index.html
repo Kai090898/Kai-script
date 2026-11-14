@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>我的腳本庫</title>
+<style>
+:root{--bg:#f7f6f2;--card:#fff;--tx:#1f1e1b;--mu:#6f6c64;--bd:#e2dfd6;--ac:#c4622d;--acx:#fff;--code:#f1efe8;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#1c1b19;--card:#262522;--tx:#efede6;--mu:#a09c92;--bd:#3a3834;--ac:#e07b45;--acx:#1c1b19;--code:#1f1e1c;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#1c1b19;--card:#262522;--tx:#efede6;--mu:#a09c92;--bd:#3a3834;--ac:#e07b45;--acx:#1c1b19;--code:#1f1e1c;color-scheme:dark}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:16px/1.6 system-ui,-apple-system,"Noto Sans TC","PingFang TC",sans-serif}
+main{max-width:760px;margin:0 auto;padding:20px 16px 60px}
+h1{font-size:1.5rem;margin:8px 0 14px}
+.bar{display:flex;gap:8px;margin-bottom:16px}
+input,textarea{width:100%;font:inherit;color:var(--tx);background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:10px 12px}
+textarea{min-height:160px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.9rem}
+button{font:inherit;border:1px solid var(--bd);background:var(--card);color:var(--tx);border-radius:10px;padding:8px 14px;cursor:pointer}
+button.p{background:var(--ac);color:var(--acx);border-color:var(--ac);font-weight:600}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:14px;padding:14px;margin-bottom:12px}
+.hd{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.hd h2{font-size:1.05rem;margin:0}
+.tag{font-size:.75rem;color:var(--mu)}
+pre{background:var(--code);border-radius:10px;padding:12px;margin:10px 0;white-space:pre-wrap;word-break:break-word;font:.88rem/1.55 ui-monospace,Menlo,Consolas,monospace;max-height:220px;overflow:auto}
+.act{display:flex;gap:8px;flex-wrap:wrap}
+.act button{padding:6px 12px;font-size:.9rem}
+.empty{text-align:center;color:var(--mu);padding:40px 0}
+#ed{display:none;margin-bottom:16px}
+#ed input{margin-bottom:8px}
+</style>
+</head>
+<body>
+<main>
+<h1>📜 我的腳本庫</h1>
+<div class="bar"><input id="q" placeholder="搜尋標題或內容…"><button class="p" id="add">＋新增</button></div>
+<div class="card" id="ed">
+<input id="t" placeholder="標題">
+<input id="g" placeholder="語言／分類（如 Python、Shell）">
+<textarea id="c" placeholder="貼上程式碼…" spellcheck="false" autocapitalize="off" autocorrect="off"></textarea>
+<div class="act" style="margin-top:8px"><button class="p" id="save">儲存</button><button id="cancel">取消</button></div>
+</div>
+<div id="list"></div>
+</main>
+<script>
+var KEY="my-scripts-v3",items=[],editing=null;
+var seed=[{id:4,t:"拳擊探測器",g:"Lua",c:"loadstring(game:HttpGet('https://raw.githubusercontent.com/Kai090898/Kai-script/refs/heads/main/%E6%8B%B3%E6%93%8A%E6%8E%A2%E6%B8%AC%E5%99%A8'))();"},{id:3,t:"拳擊模擬器",g:"Lua",c:"loadstring(game:HttpGet('https://raw.githubusercontent.com/Kai090898/Kai-script/refs/heads/main/%E6%8B%B3%E6%93%8A%E6%A8%A1%E6%93%AC%E5%99%A8'))();"},{id:2,t:"朵拉是甲",g:"Lua",c:"loadstring(game:HttpGet('https://raw.githubusercontent.com/Kai090898/Kai-script/refs/heads/main/%E6%9C%B5%E6%8B%89%E6%98%AF%E7%94%B2'))();"},{id:1,t:"櫻mini game",g:"Lua",c:"loadstring(game:HttpGet('https://raw.githubusercontent.com/Kai090898/Kai-script/refs/heads/main/%E6%AB%BBmini%20game'))();"}];
+try{var s=localStorage.getItem(KEY);items=s?JSON.parse(s):seed}catch(e){items=seed}
+function persist(){try{localStorage.setItem(KEY,JSON.stringify(items))}catch(e){}}
+function esc(x){return String(x).replace(/[&<>"]/g,function(m){return{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[m]})}
+function render(){
+ var k=document.getElementById("q").value.trim().toLowerCase(),h="";
+ var f=items.filter(function(i){return !k||(i.t+i.g+i.c).toLowerCase().indexOf(k)>-1});
+ f.forEach(function(i){h+='<div class="card"><div class="hd"><h2>'+esc(i.t)+'</h2><span class="tag">'+esc(i.g)+'</span></div><pre>'+esc(i.c)+'</pre><div class="act"><button class="p" data-a="copy" data-id="'+i.id+'">複製</button><button data-a="edit" data-id="'+i.id+'">編輯</button><button data-a="del" data-id="'+i.id+'">刪除</button></div></div>'});
+ document.getElementById("list").innerHTML=h||'<div class="empty">還沒有腳本，點右上角「新增」開始吧</div>';
+}
+function copy(text,btn){
+ function ok(){var o=btn.textContent;btn.textContent="已複製 ✓";setTimeout(function(){btn.textContent=o},1200)}
+ function fb(){var a=document.createElement("textarea");a.value=text;document.body.appendChild(a);a.select();try{document.execCommand("copy");ok()}catch(e){}document.body.removeChild(a)}
+ if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(text).then(ok,fb)}else fb();
+}
+function openEd(i){editing=i?i.id:null;document.getElementById("t").value=i?i.t:"";document.getElementById("g").value=i?i.g:"";document.getElementById("c").value=i?i.c:"";document.getElementById("ed").style.display="block";document.getElementById("t").focus()}
+document.getElementById("add").onclick=function(){openEd(null)};
+document.getElementById("cancel").onclick=function(){document.getElementById("ed").style.display="none"};
+document.getElementById("q").oninput=render;
+document.getElementById("save").onclick=function(){
+ var t=document.getElementById("t").value.trim()||"未命名",g=document.getElementById("g").value.trim(),c=document.getElementById("c").value;
+ if(editing){items.forEach(function(i){if(i.id===editing){i.t=t;i.g=g;i.c=c}})}else{items.unshift({id:Date.now(),t:t,g:g,c:c})}
+ persist();document.getElementById("ed").style.display="none";render();
+};
+document.getElementById("list").onclick=function(e){
+ var b=e.target.closest("button");if(!b)return;var id=+b.dataset.id,it=items.filter(function(i){return i.id===id})[0];
+ if(b.dataset.a==="copy")copy(it.c,b);
+ else if(b.dataset.a==="edit"){openEd(it);window.scrollTo(0,0)}
+ else if(confirm("確定要刪除這個腳本嗎？")){items=items.filter(function(i){return i.id!==id});persist();render()}
+};
+document.getElementById("c").onkeydown=function(e){if(e.key==="Tab"){e.preventDefault();var s=this.selectionStart;this.value=this.value.slice(0,s)+"    "+this.value.slice(this.selectionEnd);this.selectionStart=this.selectionEnd=s+4}};
+render();
+</script>
+</body>
+</html>
