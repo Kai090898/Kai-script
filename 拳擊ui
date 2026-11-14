@@ -1,0 +1,616 @@
+-- ====================================================================
+--  拳擊模擬器探測器（有介面版）：只讀取、只記錄，不會修改遊戲
+--  記錄三件事：
+--   1. 遊戲有哪些介面和 Remote（伺服器溝通用的通道）
+--   2. 你手動操作時，遊戲實際送出了哪些 Remote、帶什麼參數
+--   3. 開蛋動畫結束後，還有哪些物件殘留在畫面上（造成卡頓的原因）
+--  結果自動複製到剪貼簿，也存成 KaiPunchProbe.txt
+--
+--  用法：打開介面 →「錄製」分頁設定秒數 → 按「開始錄製」，
+--        然後照「要做的事」分頁一項一項操作，最後幾秒什麼都不要做。
+-- ====================================================================
+-- ===== 進度提示（畫面上方中間；不依賴介面庫，用來確認腳本有沒有真的在跑）=====
+local __stageGui, __stageLabel
+local function __stage(text)
+    print("[" .. text .. "]")  -- 也印到主控台的 Log，畫面上看不到時可以在那裡找
+    pcall(function()
+        if not __stageGui or not __stageGui.Parent then
+            __stageGui = Instance.new("ScreenGui")
+            __stageGui.Name = "KaiProbeStage"
+            __stageGui.ResetOnSpawn = false
+            __stageGui.IgnoreGuiInset = true
+            __stageGui.DisplayOrder = 998
+            local ok = pcall(function()
+                __stageGui.Parent = (gethui and gethui()) or game:GetService("CoreGui")
+            end)
+            if not ok or not __stageGui.Parent then
+                __stageGui.Parent = game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")
+            end
+            local frame = Instance.new("Frame")
+            frame.Size = UDim2.fromOffset(330, 30)
+            frame.AnchorPoint = Vector2.new(0.5, 0)
+            frame.Position = UDim2.new(0.5, 0, 0, 130)
+            frame.BackgroundColor3 = Color3.new(0, 0, 0)
+            frame.BackgroundTransparency = 0.15
+            frame.Parent = __stageGui
+            __stageLabel = Instance.new("TextLabel")
+            __stageLabel.Size = UDim2.new(1, -12, 1, 0)
+            __stageLabel.Position = UDim2.fromOffset(6, 0)
+            __stageLabel.BackgroundTransparency = 1
+            __stageLabel.TextColor3 = Color3.new(1, 1, 1)
+            __stageLabel.TextXAlignment = Enum.TextXAlignment.Left
+            __stageLabel.TextSize = 14
+            __stageLabel.Font = Enum.Font.GothamMedium
+            __stageLabel.Parent = frame
+        end
+        __stageLabel.Text = text
+    end)
+end
+
+__stage("探測器：① 檔案已開始執行")
+
+local function __probeMain()
+local env = (getgenv and getgenv()) or _G
+
+-- 已經開著的話，直接把視窗叫出來就好
+if env.KaiPunchProbe and env.KaiPunchProbe.alive() then
+    env.KaiPunchProbe.show()
+    return
+end
+
+local UI = loadstring(game:HttpGet("https://raw.githubusercontent.com/Kai090898/Kai-script/refs/heads/main/%E5%8D%A1%E4%BE%9Dui"))()
+
+__stage("探測器：② 介面庫載入完成")
+
+local Players = game:GetService("Players")
+local RS = game:GetService("ReplicatedStorage")
+local pg = Players.LocalPlayer:WaitForChild("PlayerGui")
+
+local function notify(title, content, duration)
+    UI:Notify({Title = title, Content = content, Duration = duration or 3})
+end
+
+-- ===== 要做的事（錄製時照這個順序操作）=====
+local TASKS = {
+    "① 自動訓練：按一次「自動訓練」，或手動訓練幾下",
+    "② 飛升一次",
+    "③ 轉一次轉盤",
+    "④ 領一次遊玩禮物 / 任務",
+    "⑤ 開蛋：Open 開 3 次、Open 3 開 2 次",
+    "⑥ 合成一次裝備（Craft）",
+    "⑦ 買一次裝備",
+    "⑧ 許願井許一次願",
+    "⑨ 合成一次寵物（Merge）",
+    "⑩ 傳送到別的地點一次",
+}
+local taskDone = {}
+local taskToggles = {}
+
+-- ===== 設定 =====
+local duration = 180      -- 錄製總秒數
+local tailSecs = 20       -- 最後幾秒什麼都不要做（讓殘留的動畫物件顯示出來）
+
+-- ===== 錄製狀態 =====
+local alive = true
+local recording = false
+local startAt, endAt, runId = 0, 0, 0
+local runTail = 0
+local tailNotified = false
+local lastReport = nil
+
+local out = {}
+local calls = {}
+local born = setmetatable({}, {__mode = "k"})
+local conns = {}
+
+local function log(s)
+    table.insert(out, s)
+end
+
+-- ===== 把參數轉成文字 =====
+local function ser(v, d)
+    d = d or 0
+    local t = typeof(v)
+    if t == "string" then
+        return '"' .. v:sub(1, 60) .. '"'
+    elseif t == "table" then
+        if d >= 2 then return "{…}" end
+        local parts, c = {}, 0
+        for k, x in pairs(v) do
+            c += 1
+            if c > 8 then
+                table.insert(parts, "…")
+                break
+            end
+            table.insert(parts, tostring(k) .. "=" .. ser(x, d + 1))
+        end
+        return "{" .. table.concat(parts, ", ") .. "}"
+    elseif t == "Instance" then
+        local ok, name = pcall(function() return v:GetFullName() end)
+        return "<" .. (ok and name or "?") .. ">"
+    end
+    return tostring(v)
+end
+
+local function record(remote, method, args)
+    local key = remote:GetFullName()
+    local e = calls[key]
+    if not e then
+        e = {cls = remote.ClassName, method = method, count = 0, samples = {}, first = tick() - startAt}
+        calls[key] = e
+    end
+    e.count += 1
+    if #e.samples < 4 then
+        local parts = {}
+        for i = 1, args.n do
+            parts[i] = ser(args[i])
+        end
+        local s = table.concat(parts, ", ")
+        for _, x in ipairs(e.samples) do
+            if x == s then return end
+        end
+        table.insert(e.samples, s)
+    end
+end
+
+-- ===== 監聽送出的 Remote（只在錄製中才記錄；按下開始錄製時才安裝）=====
+local spyOn = false
+local spyTried = false
+local spyError = nil
+
+local function installSpy()
+    if spyTried then
+        return
+    end
+    spyTried = true
+    if not (hookmetamethod and getnamecallmethod and newcclosure) then
+        spyError = "這個執行器不支援 hookmetamethod"
+        return
+    end
+    local ok, err = pcall(function()
+        local old
+        old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+            if recording then
+                local m = getnamecallmethod()
+                if (m == "FireServer" or m == "InvokeServer") and not (checkcaller and checkcaller()) then
+                    pcall(function()
+                        if typeof(self) == "Instance" and self.ClassName:find("Remote") then
+                            record(self, m, table.pack(...))
+                        end
+                    end)
+                end
+            end
+            return old(self, ...)
+        end))
+    end)
+    if ok then
+        spyOn = true
+    else
+        spyError = tostring(err)
+    end
+end
+
+-- ===== 開始時：介面和 Remote 清單 =====
+local function snapshot()
+    log("===== PlayerGui 介面 =====")
+    for _, g in ipairs(pg:GetChildren()) do
+        log(g.Name .. " [" .. g.ClassName .. "]" .. (g:IsA("ScreenGui") and (" Enabled=" .. tostring(g.Enabled)) or ""))
+    end
+
+    log("\n===== ReplicatedStorage 裡的 Remote / Bindable（最多 300 個）=====")
+    local n = 0
+    for _, v in ipairs(RS:GetDescendants()) do
+        if v.ClassName:find("Remote") or v:IsA("BindableEvent") or v:IsA("BindableFunction") then
+            n += 1
+            if n <= 300 then
+                log(v:GetFullName() .. " [" .. v.ClassName .. "]")
+            end
+        end
+    end
+    log("共 " .. n .. " 個")
+
+    log("\n===== workspace 最上層（最多 80 個）=====")
+    for i, c in ipairs(workspace:GetChildren()) do
+        if i > 80 then break end
+        log(c.Name .. " [" .. c.ClassName .. "]")
+    end
+end
+
+-- ===== 追蹤新出現的物件（找開蛋動畫的殘留）=====
+local function startTracking()
+    born = setmetatable({}, {__mode = "k"})
+    local function track(root, label)
+        table.insert(conns, root.DescendantAdded:Connect(function(d)
+            born[d] = {t = tick(), label = label}
+        end))
+    end
+    track(pg, "PlayerGui")
+    track(workspace, "Workspace")
+    if workspace.CurrentCamera then
+        track(workspace.CurrentCamera, "Camera")
+    end
+end
+
+local function stopTracking()
+    for _, c in ipairs(conns) do
+        pcall(function() c:Disconnect() end)
+    end
+    conns = {}
+end
+
+-- ===== 結束時整理報告 =====
+local function finish(reason)
+    if not recording then
+        return
+    end
+    recording = false
+    runId += 1
+
+    -- 開頭：這次錄製的資訊和你有做的項目（方便對照）
+    local head = {}
+    table.insert(head, "===== 錄製資訊 =====")
+    table.insert(head, string.format("設定 %d 秒｜實際錄了 %.0f 秒｜結束原因：%s", duration, tick() - startAt, reason))
+    table.insert(head, "你勾選「已完成」的項目：")
+    local anyDone = false
+    for i, name in ipairs(TASKS) do
+        if taskDone[i] then
+            anyDone = true
+            table.insert(head, "  ✔ " .. name)
+        end
+    end
+    if not anyDone then
+        table.insert(head, "  （沒有勾選任何項目）")
+    end
+    table.insert(head, "")
+
+    if spyOn then
+        log("\n===== 你操作時送出的 Remote（次數多的在前）=====")
+        local list = {}
+        for key, e in pairs(calls) do
+            table.insert(list, {key = key, e = e})
+        end
+        table.sort(list, function(a, b) return a.e.count > b.e.count end)
+        if #list == 0 then
+            log("（錄製期間沒有記錄到任何送出的 Remote）")
+        end
+        for i, it in ipairs(list) do
+            if i > 70 then break end
+            log(string.format("\n%s [%s:%s] 共%d次 首次在%.0f秒", it.key, it.e.cls, it.e.method, it.e.count, it.e.first))
+            for _, s in ipairs(it.e.samples) do
+                log("   參數：" .. s)
+            end
+        end
+    else
+        log("\n（沒辦法監聽送出的 Remote：" .. tostring(spyError) .. "）")
+    end
+
+    log("\n===== 存活超過 8 秒的新物件（數量多的在前）=====")
+    local groups = {}
+    local now = tick()
+    for d, info in pairs(born) do
+        if now - info.t > 8 and d:IsDescendantOf(game) then
+            local ok, full = pcall(function() return d:GetFullName() end)
+            if ok then
+                local key = info.label .. "｜" .. full:gsub("%d+", "#") .. " [" .. d.ClassName .. "]"
+                groups[key] = (groups[key] or 0) + 1
+            end
+        end
+    end
+    local gl = {}
+    for k, c in pairs(groups) do
+        table.insert(gl, {k = k, c = c})
+    end
+    table.sort(gl, function(a, b) return a.c > b.c end)
+    if #gl == 0 then
+        log("（沒有）")
+    end
+    for i, g in ipairs(gl) do
+        if i > 45 then break end
+        log(string.format("%d × %s", g.c, g.k))
+    end
+    stopTracking()
+    born = setmetatable({}, {__mode = "k"})
+
+    local text = table.concat(head, "\n") .. "\n" .. table.concat(out, "\n")
+    lastReport = text
+
+    local copied = setclipboard and pcall(setclipboard, text)
+    local saved = writefile and pcall(writefile, "KaiPunchProbe.txt", text)
+    local msg
+    if copied and saved then
+        msg = "已複製到剪貼簿，也存成 KaiPunchProbe.txt"
+    elseif copied then
+        msg = "已複製到剪貼簿"
+    elseif saved then
+        msg = "已存成 KaiPunchProbe.txt（這個執行器不能複製）"
+    else
+        msg = "這個執行器不能複製也不能存檔，請看 F9 輸出"
+        print(text)
+    end
+    notify("錄製完成（" .. reason .. "）", msg, 8)
+end
+
+-- ===== 開始錄製 =====
+local function startRecording()
+    if recording then
+        notify("已經在錄製了", "要提早結束請按「停止並輸出」")
+        return
+    end
+    installSpy()
+    if not spyOn then
+        notify("提醒", "沒辦法監聽送出的 Remote，只能記錄介面和殘留物件（" .. tostring(spyError) .. "）", 8)
+    end
+    out, calls = {}, {}
+    startAt = tick()
+    endAt = startAt + duration
+    runTail = math.min(tailSecs, math.max(duration - 5, 0))
+    tailNotified = false
+    runId += 1
+    local id = runId
+
+    snapshot()
+    startTracking()
+    recording = true
+
+    notify("開始錄製",
+        string.format("共 %d 秒，請照「要做的事」操作；最後 %d 秒什麼都不要做", duration, runTail), 6)
+
+    task.delay(duration, function()
+        if recording and runId == id then
+            finish("時間到")
+        end
+    end)
+end
+
+-- ===== 介面 =====
+local Window = UI:CreateWindow({
+    Name = "拳擊模擬器探測器",
+    GuiName = "KaiUI_PunchProbe",
+    FloatText = "探",
+    FloatPosition = UDim2.new(0, 10, 0.7, 0),
+    PositionOffset = Vector2.new(60, 40),
+    DisplayOrder = 102,
+    Theme = "black",
+})
+
+__stage("探測器：③ 視窗已建立")
+
+local RecTab = Window:CreateTab("錄製")
+local TaskTab = Window:CreateTab("要做的事")
+
+local function nextTaskIndex()
+    for i = 1, #TASKS do
+        if not taskDone[i] then
+            return i
+        end
+    end
+    return nil
+end
+
+local function setName(btn, text)
+    pcall(function() btn:SetName(text) end)
+end
+
+-- ---------- 錄製 ----------
+RecTab:CreateSection("狀態")
+
+local statusBtn = RecTab:CreateButton({
+    Name = "狀態：待機中",
+    Callback = function() end,
+})
+
+local hintBtn
+hintBtn = RecTab:CreateButton({
+    Name = "按下「開始錄製」後照順序操作",
+    Callback = function()
+        -- 錄製中點一下，就幫你把目前這一項打勾、跳到下一項
+        if not recording then
+            return
+        end
+        local i = nextTaskIndex()
+        if i and taskToggles[i] then
+            pcall(function() taskToggles[i]:Set(true) end)
+        end
+    end,
+})
+
+RecTab:CreateSection("設定")
+
+RecTab:CreateInput({
+    Name = "錄製秒數（輸入數字）",
+    PlaceholderText = "預設 180",
+    Callback = function(text)
+        local n = tonumber(text)
+        if n and n >= 10 and n <= 3600 then
+            duration = math.floor(n)
+            notify("已設定", "錄製 " .. duration .. " 秒" .. (recording and "（下一次錄製才會生效）" or ""))
+        else
+            notify("輸入錯誤", "請輸入 10 ~ 3600 的數字")
+        end
+    end,
+})
+
+RecTab:CreateInput({
+    Name = "最後不操作的秒數（輸入數字）",
+    PlaceholderText = "預設 20，讓殘留物件顯示出來",
+    Callback = function(text)
+        local n = tonumber(text)
+        if n and n >= 0 and n <= 600 then
+            tailSecs = math.floor(n)
+            notify("已設定", "最後 " .. tailSecs .. " 秒不要操作" .. (recording and "（下一次錄製才會生效）" or ""))
+        else
+            notify("輸入錯誤", "請輸入 0 ~ 600 的數字")
+        end
+    end,
+})
+
+RecTab:CreateSection("操作")
+
+RecTab:CreateButton({
+    Name = "開始錄製",
+    Callback = function()
+        startRecording()
+    end,
+})
+
+RecTab:CreateButton({
+    Name = "停止並輸出結果",
+    Callback = function()
+        if recording then
+            finish("手動停止")
+        else
+            notify("沒有在錄製", "請先按「開始錄製」")
+        end
+    end,
+})
+
+RecTab:CreateButton({
+    Name = "再複製一次上次的結果",
+    Callback = function()
+        if not lastReport then
+            notify("還沒有結果", "請先錄製一次")
+        elseif setclipboard and pcall(setclipboard, lastReport) then
+            notify("已複製", "上次的結果已複製到剪貼簿")
+        else
+            notify("無法複製", "這個執行器不支援複製")
+        end
+    end,
+})
+
+RecTab:CreateButton({
+    Name = "隱藏視窗（會出現可拖曳的小按鈕）",
+    Callback = function()
+        UI:SetVisibility(false)
+    end,
+})
+
+-- ---------- 要做的事 ----------
+TaskTab:CreateSection("做完一項就打勾（輸出時會一起記錄）")
+
+for i, name in ipairs(TASKS) do
+    taskDone[i] = false
+    taskToggles[i] = TaskTab:CreateToggle({
+        Name = name,
+        CurrentValue = false,
+        Callback = function(v)
+            taskDone[i] = v and true or false
+        end,
+    })
+end
+
+TaskTab:CreateSection("最後")
+
+TaskTab:CreateButton({
+    Name = "最後的 N 秒：什麼都不要做（N 在「錄製」分頁設定）",
+    Callback = function() end,
+})
+
+TaskTab:CreateButton({
+    Name = "全部取消打勾",
+    Callback = function()
+        for i = 1, #TASKS do
+            pcall(function() taskToggles[i]:Set(false) end)
+        end
+    end,
+})
+
+-- ===== 狀態顯示（倒數 + 下一步提示）=====
+task.spawn(function()
+    while alive do
+        if recording then
+            local left = math.max(math.ceil(endAt - tick()), 0)
+            local inTail = left <= runTail
+
+            if inTail and not tailNotified then
+                tailNotified = true
+                notify("最後 " .. runTail .. " 秒", "請什麼都不要做，等殘留的動畫物件顯示出來", 6)
+            end
+
+            setName(statusBtn, string.format("錄製中｜剩 %d 秒%s", left, inTail and "｜現在不要操作" or ""))
+
+            if inTail then
+                setName(hintBtn, "最後階段：什麼都不要做，等它結束")
+            else
+                local i = nextTaskIndex()
+                if i then
+                    setName(hintBtn, "下一步：" .. TASKS[i] .. "（做完點我打勾）")
+                else
+                    setName(hintBtn, "所有項目都做完了，等時間到或按「停止並輸出」")
+                end
+            end
+        else
+            setName(statusBtn, lastReport and "狀態：待機中（上次結果已輸出）" or "狀態：待機中")
+            setName(hintBtn, "按下「開始錄製」後照順序操作")
+        end
+        task.wait(0.3)
+    end
+end)
+
+-- 關閉視窗時，如果還在錄製就先輸出結果
+UI:OnClose(function()
+    alive = false
+    if recording then
+        pcall(finish, "視窗關閉")
+    end
+end)
+
+env.KaiPunchProbe = {
+    alive = function() return alive end,
+    show = function() UI:SetVisibility(true) end,
+}
+
+notify("拳擊模擬器探測器", "載入完成，請到「錄製」分頁開始", 4)
+__stage("探測器：④ 載入完成（這行 10 秒後消失）")
+task.delay(10, function()
+    if __stageGui then
+        __stageGui:Destroy()
+    end
+end)
+end
+
+-- 出錯時直接顯示在畫面上（不依賴介面庫），也複製到剪貼簿
+local __ok, __err = xpcall(__probeMain, function(e)
+    return debug.traceback(tostring(e), 2)
+end)
+
+if not __ok then
+    local text = "探測器載入失敗：\n" .. tostring(__err)
+    warn(text)
+    if setclipboard then
+        pcall(setclipboard, text)
+    end
+    pcall(function()
+        local gui = Instance.new("ScreenGui")
+        gui.Name = "KaiProbeError"
+        gui.ResetOnSpawn = false
+        gui.IgnoreGuiInset = true
+        gui.DisplayOrder = 999
+        local ok = pcall(function()
+            gui.Parent = (gethui and gethui()) or game:GetService("CoreGui")
+        end)
+        if not ok or not gui.Parent then
+            gui.Parent = game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")
+        end
+        local frame = Instance.new("Frame")
+        frame.Size = UDim2.new(0, 480, 0, 240)
+        frame.Position = UDim2.new(1, -490, 0, 10)
+        frame.BackgroundColor3 = Color3.new(0, 0, 0)
+        frame.BackgroundTransparency = 0.1
+        frame.Parent = gui
+        local label = Instance.new("TextLabel")
+        label.Size = UDim2.new(1, -16, 1, -16)
+        label.Position = UDim2.new(0, 8, 0, 8)
+        label.BackgroundTransparency = 1
+        label.TextColor3 = Color3.fromRGB(255, 120, 120)
+        label.TextXAlignment = Enum.TextXAlignment.Left
+        label.TextYAlignment = Enum.TextYAlignment.Top
+        label.TextWrapped = true
+        label.TextSize = 12
+        label.Font = Enum.Font.Code
+        label.Text = text .. "\n\n（已複製到剪貼簿；40 秒後自動消失）"
+        label.Parent = frame
+        task.delay(40, function()
+            gui:Destroy()
+        end)
+    end)
+end
