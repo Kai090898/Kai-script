@@ -3139,4 +3139,202 @@ do
             lastS, lastSChange = sText, now
             roundLogged = false
         end
-        if ba
+        if bal ~= lastBal then
+            blog("餘額 " .. (bal and commas(bal) or "?"))
+            lastBal = bal
+        end
+        if not turn and not roundLogged and now - lastSChange > 1 and #pr > 0 then
+            blog(string.format("這一局：你=%s（%d）莊家=%s", table.concat(pr, ","), total, table.concat(dr, ",")))
+            roundLogged = true
+        end
+
+        if #pr > 0 then
+            status = string.format("你 %d%s vs 莊家 %s｜%s｜局數 %d/%d｜餘額 %s",
+                total, soft and "（軟）" or "", dr[1] or "?",
+                advice and ("建議：" .. (advice == "HIT" and "要牌" or "停牌")) or sText,
+                rounds, maxRounds, bal and commas(bal) or "?")
+        else
+            status = string.format("%s｜局數 %d/%d｜餘額 %s", sText ~= "" and sText or "等待開局", rounds, maxRounds, bal and commas(bal) or "?")
+        end
+
+        -- 自動要牌 / 停牌
+        if autoPlay and turn and advice and now - lastAct > 0.8 then
+            local key = #pr .. ":" .. total
+            if key ~= lastKey or now - lastAct > 3 then
+                local b = findButton(main, function(t)
+                    return has(t, advice == "HIT" and "要牌" or "停牌")
+                end)
+                if b and shown(b) then
+                    click(b)
+                    lastKey, lastAct = key, now
+                    blog(string.format("%d%s vs %s → %s", total, soft and "軟" or "", dr[1] or "?", advice))
+                end
+            end
+        end
+
+        -- 自動開始下一局
+        if autoStart and not turn and now - lastSChange > 1.2 and now - lastStart > 3 then
+            if rounds >= maxRounds then
+                stopAuto("已達最大局數 " .. maxRounds)
+            elseif bal and (bal < stopBelow or bal < betChoice) then
+                stopAuto("餘額 " .. commas(bal) .. " 低於停止線或下注金額")
+            else
+                local startBtn = findButton(main, function(t) return has(t, "開始遊戲") end)
+                if startBtn and shown(startBtn) then
+                    if not has(startBtn.Text, commas(betChoice)) then
+                        local chip = findButton(main, function(t)
+                            return (t:gsub(",", "")) == tostring(betChoice)
+                        end)
+                        if chip then
+                            click(chip)
+                            lastStart = now - 2.4
+                        else
+                            stopAuto("找不到下注金額 " .. betChoice .. " 的籌碼")
+                        end
+                    else
+                        click(startBtn)
+                        rounds += 1
+                        lastStart = now
+                        blog("開始第 " .. rounds .. " 局，下注 " .. betChoice)
+                    end
+                end
+            end
+        end
+    end
+
+    task.spawn(function()
+        while true do
+            task.wait(0.25)
+            local ok, err = pcall(step)
+            if not ok then
+                status = "錯誤：" .. tostring(err)
+            end
+        end
+    end)
+
+    -- ===== 介面 =====
+    AfkTab:CreateToggle({
+        Name = "自動要牌/停牌（按建議）", CurrentValue = false,
+        Callback = function(v) autoPlay = v end,
+    })
+    -- 不存檔：避免下次載入設定時自己開始花🌸
+
+    startToggle = AfkTab:CreateToggle({
+        Name = "自動開始下一局（會花🌸）", CurrentValue = false,
+        Callback = function(v)
+            autoStart = v
+            if v then
+                rounds = 0
+                runStart = tick()
+            end
+        end,
+    })
+
+    local BETS = {"100", "300", "500", "1000", "2000", "3000"}
+    local dBet = AfkTab:CreateDropdown({
+        Name = "每局下注金額",
+        Options = BETS,
+        CurrentOption = {tostring(betChoice)},
+        Callback = function(opt)
+            local s = type(opt) == "table" and opt[1] or opt
+            local n = tonumber(s)
+            if n then betChoice = n end
+        end,
+    })
+    regDropdown("bjBet", dBet, function() return tostring(betChoice) end, function(v)
+        betChoice = tonumber(v) or betChoice
+    end)
+
+    local iRounds = AfkTab:CreateInput({
+        Name = "最多玩幾局（預設 20）",
+        PlaceholderText = "例如 20",
+        Callback = function(text)
+            local n = tonumber(text)
+            if n and n >= 1 then
+                maxRounds = math.floor(n)
+                notify("已設定", "最多 " .. maxRounds .. " 局")
+            else
+                notify("輸入錯誤", "請輸入 1 以上的整數")
+            end
+        end,
+    })
+    regNumber("bjRounds", iRounds, function() return maxRounds end, function(v)
+        maxRounds = v
+    end)
+
+    local iStop = AfkTab:CreateInput({
+        Name = "餘額低於多少就停止（預設 0）",
+        PlaceholderText = "例如 1000",
+        Callback = function(text)
+            local n = tonumber((text:gsub(",", "")))
+            if n and n >= 0 then
+                stopBelow = n
+                notify("已設定", "餘額低於 " .. commas(n) .. " 停止")
+            else
+                notify("輸入錯誤", "請輸入數字")
+            end
+        end,
+    })
+    regNumber("bjStopBelow", iStop, function() return stopBelow end, function(v)
+        stopBelow = v
+    end)
+
+    local statusBtn = AfkTab:CreateButton({
+        Name = "21點狀態  --",
+        Callback = function()
+            if setclipboard then
+                pcall(setclipboard, table.concat(logBuf, "\n"))
+            end
+            notify("21 點", status, 4)
+        end,
+    })
+    task.spawn(function()
+        while true do
+            statusBtn:SetName("21點狀態  " .. status)
+            task.wait(0.3)
+        end
+    end)
+
+    UI:OnClose(function()
+        autoPlay, autoStart = false, false
+    end)
+end
+
+-- ===== 設定 =====
+SetTab:CreateSection("設定")
+
+SetTab:CreateButton({
+    Name = "儲存設定",
+    Callback = function()
+        saveConfig()
+    end,
+})
+
+SetTab:CreateButton({
+    Name = "載入設定",
+    Callback = function()
+        loadConfig(false)
+    end,
+})
+
+SetTab:CreateButton({
+    Name = "隱藏視窗（會出現可拖曳的小按鈕）",
+    Callback = function()
+        UI:SetVisibility(false)
+    end,
+})
+
+-- 對外：讓主腳本的按鈕可以重新叫出這個視窗
+local alive = true
+UI:OnClose(function()
+    alive = false
+end)
+env.KaiSakuraAFK = {
+    alive = function() return alive end,
+    show = function() UI:SetVisibility(true) end,
+}
+
+-- 啟動時自動套用上次存的設定
+loadConfig(true)
+
+notify("櫻 mini game AFK", "載入完成", 3)
