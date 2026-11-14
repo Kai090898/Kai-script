@@ -1,0 +1,903 @@
+-- ====================================================================
+--  拳擊模擬器 AFK（獨立的第二個介面，做法跟「櫻 mini game」一樣）
+--  介面庫與主腳本共用同一個「卡依ui」，但會開成獨立的視窗
+--
+--  功能（✔ = 探測時實際看過遊戲送出這個 Remote；試驗 = 還沒驗證過）
+--   農場：自動訓練 / 自動戰鬥（按畫面左下角的按鈕）、自動點擊(試驗)、
+--         自動領遊玩禮物 ✔、自動領礦工 ✔、撿取範圍內掉落物(試驗)、
+--         自動飛升(試驗)、自動轉盤(試驗)
+--   孵蛋：自動孵蛋 ✔、瞬間開蛋、清除開蛋動畫殘留（避免越開越卡）
+--   商店：自動買裝備 ✔、自動許願 ✔（大願已驗證，小/中願名稱是猜的）、
+--         自動裝備最佳寵物(試驗)
+--   寵物：自動合成寵物（金色 ✔ / 彩虹、惡魔為依樣畫葫蘆）
+--   傳送：傳到各個世界 ✔
+--   設定：防掛機、關閉 3D 渲染、去霧、低畫質、重生
+--  還沒做：副本與 PVP、Power Core、自動領任務 / UGC、合成裝備
+-- ====================================================================
+local env = (getgenv and getgenv()) or _G
+
+-- 已經開著的話，直接把視窗叫出來就好（不要重新建立，免得掛機狀態被重設）
+if env.KaiPunchSim and env.KaiPunchSim.alive() then
+    env.KaiPunchSim.show()
+    return
+end
+
+local UI = loadstring(game:HttpGet("https://raw.githubusercontent.com/Kai090898/Kai-script/refs/heads/main/%E5%8D%A1%E4%BE%9Dui"))()
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local HttpService = game:GetService("HttpService")
+local RS = game:GetService("ReplicatedStorage")
+local Lighting = game:GetService("Lighting")
+local GuiService = game:GetService("GuiService")
+local VIM = game:GetService("VirtualInputManager")
+local LocalPlayer = Players.LocalPlayer
+
+-- ===== 小工具 =====
+local function notify(title, content, duration)
+    UI:Notify({Title = title, Content = content, Duration = duration or 3})
+end
+local function getRoot()
+    local char = LocalPlayer.Character
+    return char and char:FindFirstChild("HumanoidRootPart")
+end
+local function getHumanoid()
+    local char = LocalPlayer.Character
+    return char and char:FindFirstChildOfClass("Humanoid")
+end
+local function has(t, s)
+    return t ~= nil and t:find(s, 1, true) ~= nil
+end
+local function getPg()
+    return LocalPlayer:FindFirstChild("PlayerGui")
+end
+local function dig(root, ...)
+    local cur = root
+    for _, name in ipairs({...}) do
+        cur = cur and cur:FindFirstChild(name)
+    end
+    return cur
+end
+local function shown(obj)
+    local cur = obj
+    while cur do
+        if cur:IsA("GuiObject") and not cur.Visible then return false end
+        if cur:IsA("ScreenGui") then return cur.Enabled end
+        cur = cur.Parent
+    end
+    return false
+end
+
+-- Remote：先找 Events 資料夾，再找 ReplicatedStorage 根目錄
+local Events = RS:WaitForChild("Events", 10)
+local function getRemote(name)
+    return (Events and Events:FindFirstChild(name)) or RS:FindFirstChild(name)
+end
+local function fire(name, ...)
+    local r = getRemote(name)
+    if r and r:IsA("RemoteEvent") then
+        return pcall(r.FireServer, r, ...)
+    end
+    return false, "找不到 " .. name
+end
+local function invoke(name, ...)
+    local r = getRemote(name)
+    if r and r:IsA("RemoteFunction") then
+        return pcall(r.InvokeServer, r, ...)
+    end
+    return false, "找不到 " .. name
+end
+
+local function click(btn)
+    if getconnections then
+        for _, sig in ipairs({btn.Activated, btn.MouseButton1Click}) do
+            local ok, conns = pcall(getconnections, sig)
+            if ok and conns and #conns > 0 then
+                for _, c in ipairs(conns) do
+                    pcall(function() c:Fire() end)
+                end
+                return
+            end
+        end
+    end
+    local g = btn:FindFirstAncestorWhichIsA("ScreenGui")
+    local inset = Vector2.new(0, 0)
+    if g and not g.IgnoreGuiInset then
+        inset = GuiService:GetGuiInset()
+    end
+    local p = btn.AbsolutePosition + btn.AbsoluteSize / 2 + inset
+    VIM:SendMouseButtonEvent(p.X, p.Y, 0, true, game, 0)
+    VIM:SendMouseButtonEvent(p.X, p.Y, 0, false, game, 0)
+end
+
+-- ===== 設定存檔（只存這個介面自己的設定；會花資源的開關不存）=====
+local CONFIG_FILE = "KaiScript_PunchSim.json"
+local reg = {}
+local function regToggle(key, el, get)
+    table.insert(reg, {key = key, kind = "toggle", el = el, get = get})
+end
+local function regNumber(key, el, get, set)
+    table.insert(reg, {key = key, kind = "number", el = el, get = get, set = set})
+end
+local function regDropdown(key, el, get, set)
+    table.insert(reg, {key = key, kind = "dropdown", el = el, get = get, set = set})
+end
+local function regText(key, el, get, set)
+    table.insert(reg, {key = key, kind = "text", el = el, get = get, set = set})
+end
+
+local function saveConfig()
+    if not writefile then
+        notify("無法儲存", "這個執行器不支援檔案功能")
+        return
+    end
+    local data = {}
+    for _, r in ipairs(reg) do
+        data[r.key] = r.get()
+    end
+    local ok, err = pcall(function()
+        writefile(CONFIG_FILE, HttpService:JSONEncode(data))
+    end)
+    notify(ok and "已儲存" or "儲存失敗", ok and "拳擊模擬器 AFK 的設定已存檔" or tostring(err))
+end
+
+local function loadConfig(quiet)
+    if not (isfile and readfile) or not isfile(CONFIG_FILE) then
+        if not quiet then notify("沒有存檔", "請先按「儲存設定」") end
+        return
+    end
+    local ok, data = pcall(function()
+        return HttpService:JSONDecode(readfile(CONFIG_FILE))
+    end)
+    if not ok or type(data) ~= "table" then return end
+    for _, r in ipairs(reg) do
+        local v = data[r.key]
+        if v ~= nil then
+            if r.kind == "number" and type(v) == "number" then
+                pcall(function() r.set(v) r.el:Set(tostring(v)) end)
+            elseif r.kind == "dropdown" and type(v) == "string" then
+                pcall(function() r.set(v) r.el:Set({v}) end)
+            elseif r.kind == "text" and type(v) == "string" then
+                pcall(function() r.set(v) r.el:Set(v) end)
+            end
+        end
+    end
+    for _, r in ipairs(reg) do
+        local v = data[r.key]
+        if v ~= nil and r.kind == "toggle" and type(v) == "boolean" then
+            pcall(function() r.el:Set(v) end)
+        end
+    end
+    if not quiet then notify("已載入", "設定已套用") end
+end
+
+-- ===== 共用狀態 =====
+local S = {}        -- 各功能的開關（只在這個執行期間有效）
+local N = {         -- 數值設定
+    clickSpeed = 1.2,
+    giftCount = 12,
+    hatchDelay = 1.2,
+    cleanAge = 3,
+    shopDelay = 5,
+    mergeAmount = 5,
+    mergeDelay = 0.6,
+    magnetRange = 60,
+}
+local T = {         -- 文字 / 選項設定
+    egg = "",
+    eggCustom = "",
+    hatchMode = "自動",
+    petName = "",
+    mergeTier = "Golden",
+    teleport = "1",
+}
+local status = "--"
+local logBuf = {}
+local function blog(s)
+    table.insert(logBuf, string.format("[%s] %s", os.date("%H:%M:%S"), s))
+    if #logBuf > 200 then table.remove(logBuf, 1) end
+end
+
+-- 每隔一段時間做一件事：S[name] 為真才會執行
+local function every(name, getDelay, fn)
+    task.spawn(function()
+        while true do
+            if S[name] then
+                local ok, err = pcall(fn)
+                if not ok then
+                    blog(name .. " 錯誤：" .. tostring(err))
+                    task.wait(1)
+                end
+                task.wait(math.max(getDelay(), 0.1))
+            else
+                task.wait(0.3)
+            end
+        end
+    end)
+end
+
+-- ===== 介面 =====
+local Window = UI:CreateWindow({
+    Name = "拳擊模擬器 AFK",
+    GuiName = "KaiUI_PunchSim",
+    FloatText = "拳",
+    FloatPosition = UDim2.new(0, 10, 0.65, 0),
+    PositionOffset = Vector2.new(60, 40),
+    DisplayOrder = 102,
+    Theme = "black",  -- 額外的介面一律用純黑主題
+})
+
+local FarmTab = Window:CreateTab("農場")
+local EggTab = Window:CreateTab("孵蛋")
+local ShopTab = Window:CreateTab("商店")
+local PetTab = Window:CreateTab("寵物")
+local TpTab = Window:CreateTab("傳送")
+local SetTab = Window:CreateTab("設定")
+
+local function addToggle(tab, label, key, onChange)
+    return tab:CreateToggle({
+        Name = label,
+        CurrentValue = false,
+        Callback = function(v)
+            S[key] = v
+            if onChange then onChange(v) end
+        end,
+    })
+end
+
+local function addNumber(tab, label, placeholder, key, minv)
+    local el = tab:CreateInput({
+        Name = label,
+        PlaceholderText = placeholder,
+        Callback = function(text)
+            local n = tonumber(text)
+            if n and n >= (minv or 0) then
+                N[key] = n
+                notify("已設定", label .. " = " .. n)
+            else
+                notify("輸入錯誤", "請輸入 " .. (minv or 0) .. " 以上的數字")
+            end
+        end,
+    })
+    regNumber("n_" .. key, el, function() return N[key] end, function(v) N[key] = v end)
+    return el
+end
+
+-- ====================================================================
+--  農場
+-- ====================================================================
+FarmTab:CreateSection("狀態")
+do
+    local statusBtn = FarmTab:CreateButton({
+        Name = "狀態  --",
+        Callback = function()
+            if setclipboard then
+                pcall(setclipboard, table.concat(logBuf, "\n"))
+            end
+            notify("狀態", status, 4)
+        end,
+    })
+    task.spawn(function()
+        while true do
+            statusBtn:SetName("狀態  " .. status)
+            task.wait(0.4)
+        end
+    end)
+end
+
+FarmTab:CreateSection("自動訓練 / 戰鬥（按畫面左下角的按鈕）")
+do
+    -- 找畫面上有這段文字的按鈕（先找 OnScreenButtons、MainUi，再找全部）
+    local function findAutoButton(keywords)
+        local pg = getPg()
+        if not pg then return end
+        local roots = {}
+        for _, n in ipairs({"OnScreenButtons", "MainUi"}) do
+            local g = pg:FindFirstChild(n)
+            if g then table.insert(roots, g) end
+        end
+        table.insert(roots, pg)
+        for _, root in ipairs(roots) do
+            for _, d in ipairs(root:GetDescendants()) do
+                if d:IsA("TextLabel") or d:IsA("TextButton") then
+                    for _, kw in ipairs(keywords) do
+                        if has(d.Text, kw) and shown(d) then
+                            local cur = d
+                            while cur and cur ~= pg do
+                                if cur:IsA("GuiButton") then return cur end
+                                cur = cur.Parent
+                            end
+                            -- 沒有按鈕祖先：往上找最多三層，看裡面有沒有按鈕
+                            local p = d.Parent
+                            for _ = 1, 3 do
+                                if not p or p == pg then break end
+                                for _, c in ipairs(p:GetDescendants()) do
+                                    if c:IsA("GuiButton") then return c end
+                                end
+                                p = p.Parent
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- true = 開啟、false = 關閉、nil = 看不出來
+    local function stateOf(btn)
+        for _, d in ipairs(btn:GetDescendants()) do
+            if d:IsA("TextLabel") or d:IsA("TextButton") then
+                if has(d.Text, "開啟") then return true end
+                if has(d.Text, "關閉") then return false end
+            end
+        end
+        return nil
+    end
+
+    local function ensure(keywords, want, firstTime)
+        local btn = findAutoButton(keywords)
+        if not btn then
+            status = "找不到「" .. keywords[1] .. "」按鈕"
+            return
+        end
+        local st = stateOf(btn)
+        if st == nil then
+            if firstTime then click(btn) end
+        elseif st ~= want then
+            click(btn)
+        end
+    end
+
+    local TRAIN = {"自動訓練", "Auto Train"}
+    local FIGHT = {"自動戰鬥", "Auto Fight"}
+
+    addToggle(FarmTab, "自動訓練", "autoTrain", function(v)
+        task.spawn(function() pcall(ensure, TRAIN, v, true) end)
+    end)
+    addToggle(FarmTab, "自動戰鬥", "autoFight", function(v)
+        task.spawn(function() pcall(ensure, FIGHT, v, true) end)
+    end)
+    every("autoTrain", function() return 3 end, function() ensure(TRAIN, true, false) end)
+    every("autoFight", function() return 3 end, function() ensure(FIGHT, true, false) end)
+end
+
+FarmTab:CreateSection("領取")
+do
+    -- 自動領遊玩禮物：PlaytimeRewardUpdateEvent:FireServer(第幾個)（探測時看過 1）
+    addToggle(FarmTab, "自動領遊玩禮物（每分鐘一次）", "gifts")
+    addNumber(FarmTab, "遊玩禮物數量", "預設 12，會依序領 1 到這個數字", "giftCount", 1)
+    every("gifts", function() return 60 end, function()
+        for i = 1, math.floor(N.giftCount) do
+            fire("PlaytimeRewardUpdateEvent", i)
+            task.wait(0.3)
+        end
+        blog("已嘗試領取遊玩禮物 1~" .. math.floor(N.giftCount))
+    end)
+
+    -- 自動領礦工：MinerCurrency:InvokeServer("Claim", 礦工的 HitboxPart)
+    addToggle(FarmTab, "自動領礦工（每 30 秒）", "miner")
+    every("miner", function() return 30 end, function()
+        local hit = dig(workspace, "TouchHexagons", "MinerHexagon", "MinerUI", "HitboxPart")
+        if hit then
+            local ok, res = invoke("MinerCurrency", "Claim", hit)
+            blog("領礦工：" .. tostring(ok) .. " " .. tostring(res))
+        else
+            blog("找不到礦工的 HitboxPart")
+        end
+    end)
+
+    -- 撿取範圍內的掉落物（試驗）：用 firetouchinterest 觸發遊戲自己的撿取
+    addToggle(FarmTab, "撿取範圍內掉落物（試驗）", "magnet")
+    addNumber(FarmTab, "撿取範圍", "預設 60", "magnetRange", 5)
+    every("magnet", function() return 0.5 end, function()
+        local folder = workspace:FindFirstChild("ClientCoinsGems")
+        local root = getRoot()
+        if not (folder and root and firetouchinterest) then return end
+        local n = 0
+        for _, p in ipairs(folder:GetDescendants()) do
+            if p:IsA("BasePart") and (p.Position - root.Position).Magnitude <= N.magnetRange then
+                firetouchinterest(root, p, 0)
+                firetouchinterest(root, p, 1)
+                n += 1
+                if n >= 40 then break end
+            end
+        end
+    end)
+end
+
+FarmTab:CreateSection("點擊 / 飛升 / 轉盤（試驗）")
+do
+    -- 自動點擊：送出 DamageIncreaseOnClickEvent（探測時你點擊時看過，沒有參數）
+    addToggle(FarmTab, "自動點擊（試驗）", "autoClick")
+    addNumber(FarmTab, "自動點擊速度（每秒幾次）", "預設 1.2", "clickSpeed", 0.1)
+    every("autoClick", function() return 1 / N.clickSpeed end, function()
+        fire("DamageIncreaseOnClickEvent")
+    end)
+
+    -- 飛升 / 轉盤：Remote 名稱是 AscendEvent、SpinWheelEvent，但還沒看過實際參數，先試無參數
+    addToggle(FarmTab, "自動飛升（試驗）", "ascend")
+    every("ascend", function() return 5 end, function()
+        fire("AscendEvent")
+    end)
+    addToggle(FarmTab, "自動轉盤（試驗）", "spin")
+    every("spin", function() return 5 end, function()
+        fire("SpinWheelEvent")
+    end)
+end
+
+-- ====================================================================
+--  孵蛋
+-- ====================================================================
+EggTab:CreateSection("孵蛋")
+local hatchCount = 0
+do
+    -- 蛋的名稱：來自 workspace.EggVendors 底下的名字（探測時看過 Forest2、HalloweenEgg）
+    local function listEggs()
+        local names = {}
+        local f = workspace:FindFirstChild("EggVendors")
+        if f then
+            for _, c in ipairs(f:GetChildren()) do
+                if not table.find(names, c.Name) then
+                    table.insert(names, c.Name)
+                end
+            end
+        end
+        table.sort(names)
+        if #names == 0 then
+            names = {"Forest2", "HalloweenEgg"}
+        end
+        return names
+    end
+
+    local eggs = listEggs()
+    T.egg = eggs[1]
+
+    local dEgg = EggTab:CreateDropdown({
+        Name = "選擇蛋",
+        Options = eggs,
+        CurrentOption = {T.egg},
+        Callback = function(opt)
+            T.egg = type(opt) == "table" and opt[1] or opt
+        end,
+    })
+    regDropdown("egg", dEgg, function() return T.egg end, function(v) T.egg = v end)
+
+    local iCustom = EggTab:CreateInput({
+        Name = "自訂蛋名稱（留空就用上面的選單）",
+        PlaceholderText = "例如 Forest2",
+        Callback = function(text)
+            T.eggCustom = tostring(text or "")
+            notify("已設定", T.eggCustom ~= "" and ("自訂蛋 = " .. T.eggCustom) or "改用選單的蛋")
+        end,
+    })
+    regText("eggCustom", iCustom, function() return T.eggCustom end, function(v) T.eggCustom = v end)
+
+    local MODES = {"自動", "Open3", "事件"}
+    local dMode = EggTab:CreateDropdown({
+        Name = "孵蛋方式（自動 = 有 Open 按鈕就按，沒有就送事件）",
+        Options = MODES,
+        CurrentOption = {T.hatchMode},
+        Callback = function(opt)
+            T.hatchMode = type(opt) == "table" and opt[1] or opt
+        end,
+    })
+    regDropdown("hatchMode", dMode, function() return T.hatchMode end, function(v) T.hatchMode = v end)
+
+    addToggle(EggTab, "自動孵蛋（要站在蛋旁邊）", "hatch")
+    addNumber(EggTab, "孵蛋間隔（秒）", "預設 1.2", "hatchDelay", 0.3)
+    addToggle(EggTab, "孵蛋前先傳送到蛋旁邊", "eggTeleport")
+
+    EggTab:CreateButton({
+        Name = "複製所有蛋的名稱",
+        Callback = function()
+            local list = table.concat(listEggs(), ", ")
+            if setclipboard then pcall(setclipboard, list) end
+            notify("蛋的名稱", list, 8)
+        end,
+    })
+
+    -- PetsPopup 上的 Open1 / Open3 按鈕（靠近蛋時才會出現）
+    local function findOpenButton(name)
+        local b = dig(getPg(), "PetsPopup", "Frame", name)
+        if b and shown(b) then return b end
+    end
+
+    local function hatchOnce()
+        local egg = (T.eggCustom ~= "" and T.eggCustom) or T.egg
+        if S.eggTeleport then
+            local vend = dig(workspace, "EggVendors", egg)
+            local root = getRoot()
+            if vend and root then
+                local ok, pivot = pcall(function() return vend:GetPivot() end)
+                if ok and (root.Position - pivot.Position).Magnitude > 12 then
+                    root.CFrame = CFrame.new(pivot.Position + Vector3.new(0, 4, 0))
+                    task.wait(0.4)
+                end
+            end
+        end
+        local used = false
+        if T.hatchMode ~= "事件" then
+            local btn = findOpenButton(T.hatchMode == "Open3" and "Open3" or "Open1")
+            if btn then
+                click(btn)
+                used = true
+            end
+        end
+        if not used then
+            fire("PlayerPressedKeyOnEgg", egg)
+        end
+        hatchCount += 1
+        status = string.format("已孵蛋 %d 次（%s，%s）", hatchCount, egg, used and "按鈕" or "事件")
+        if S.instantOpen then
+            task.wait(0.15)
+            for _, n in ipairs({"PetOpenUI", "PetOpenUIOLD"}) do
+                local g = dig(getPg(), n)
+                if g then g.Enabled = false end
+            end
+        end
+    end
+    every("hatch", function() return N.hatchDelay end, hatchOnce)
+end
+
+EggTab:CreateSection("開蛋動畫（避免越開越卡）")
+do
+    -- 記下開蛋介面「原本就有」的東西，之後新長出來的（動畫複製品）過一陣子就清掉
+    local baseline = {}
+    local born = {}
+    local hooked = {}
+
+    local function hookUI(g)
+        if hooked[g] then return end
+        hooked[g] = true
+        for _, d in ipairs(g:GetDescendants()) do
+            baseline[d] = true
+        end
+        g.DescendantAdded:Connect(function(d)
+            if not baseline[d] then
+                born[d] = tick()
+            end
+        end)
+        g.AncestryChanged:Connect(function()
+            if not g.Parent then hooked[g] = nil end
+        end)
+    end
+
+    local function hookAll()
+        for _, n in ipairs({"PetOpenUI", "PetOpenUIOLD"}) do
+            local g = dig(getPg(), n)
+            if g then hookUI(g) end
+        end
+    end
+    hookAll()
+
+    local removed = 0
+    local function clean(maxAge)
+        hookAll()
+        local now = tick()
+        for d, t in pairs(born) do
+            if not d.Parent then
+                born[d] = nil
+            elseif now - t >= maxAge then
+                born[d] = nil
+                pcall(function() d:Destroy() end)
+                removed += 1
+            end
+        end
+    end
+
+    addToggle(EggTab, "清除開蛋動畫殘留", "cleanHatch")
+    addNumber(EggTab, "動畫保留幾秒後清除", "預設 3，越小越乾淨，但太小會把正在播的動畫弄壞", "cleanAge", 0.5)
+    addToggle(EggTab, "瞬間開蛋（開完立刻關掉開蛋畫面）", "instantOpen")
+    every("cleanHatch", function() return 1 end, function()
+        clean(N.cleanAge)
+    end)
+
+    EggTab:CreateButton({
+        Name = "立刻清除全部殘留",
+        Callback = function()
+            clean(0)
+            notify("開蛋動畫", "已清除，累計清掉 " .. removed .. " 個物件", 4)
+        end,
+    })
+end
+
+-- ====================================================================
+--  商店
+-- ====================================================================
+ShopTab:CreateSection("裝備與許願")
+do
+    addNumber(ShopTab, "動作間隔（秒）", "預設 5", "shopDelay", 1)
+
+    -- 買裝備：EquipmentStoreEvent:InvokeServer("Purchase", 第幾格)（探測時看過第 2 格）
+    for i = 1, 3 do
+        addToggle(ShopTab, "自動買裝備（第 " .. i .. " 格）", "buy" .. i)
+    end
+    -- 許願：WishingWell:FireServer("Mega")（探測時看過；Small / Medium 是照名字猜的）
+    addToggle(ShopTab, "自動小許願", "wishSmall")
+    addToggle(ShopTab, "自動中許願", "wishMedium")
+    addToggle(ShopTab, "自動大許願", "wishMega")
+
+    task.spawn(function()
+        while true do
+            for i = 1, 3 do
+                if S["buy" .. i] then
+                    local ok, res = invoke("EquipmentStoreEvent", "Purchase", i)
+                    if not ok then blog("買裝備 " .. i .. " 失敗：" .. tostring(res)) end
+                    task.wait(0.3)
+                end
+            end
+            for key, arg in pairs({wishSmall = "Small", wishMedium = "Medium", wishMega = "Mega"}) do
+                if S[key] then
+                    fire("WishingWell", arg)
+                    task.wait(0.3)
+                end
+            end
+            task.wait(math.max(N.shopDelay, 1))
+        end
+    end)
+
+    -- 裝備最佳寵物（試驗）：EquipBest:InvokeServer()
+    addToggle(ShopTab, "自動裝備最佳寵物（試驗，每 30 秒）", "equipBest")
+    every("equipBest", function() return 30 end, function()
+        local ok, res = invoke("EquipBest")
+        blog("裝備最佳寵物：" .. tostring(ok) .. " " .. tostring(res))
+    end)
+end
+
+-- ====================================================================
+--  寵物
+-- ====================================================================
+PetTab:CreateSection("合成寵物")
+do
+    -- GenerateInventory:InvokeServer() 回傳背包；合成時把「id = 寵物資料」的表送給合成 Remote
+    local function collectPets(t, out, depth)
+        if type(t) ~= "table" or depth > 4 then return end
+        for k, v in pairs(t) do
+            if type(v) == "table" then
+                if v.name ~= nil and v.petType ~= nil then
+                    out[#out + 1] = {id = k, info = v}
+                else
+                    collectPets(v, out, depth + 1)
+                end
+            end
+        end
+    end
+    local function readPets()
+        local ok, inv = invoke("GenerateInventory")
+        if not ok or type(inv) ~= "table" then
+            return nil, tostring(inv)
+        end
+        local list = {}
+        collectPets(inv, list, 0)
+        return list
+    end
+
+    -- 金色 ✔（探測時看過 PlayerGoldenMerge）；彩虹 / 惡魔的 Remote 存在，但沒看過實際合成
+    local TIERS = {
+        Golden = {remote = "PlayerGoldenMerge", from = "normal"},
+        Rainbow = {remote = "PlayerRainbowMerge", from = "golden"},
+        Demonic = {remote = "PlayerDemonicMerge", from = "rainbow"},
+    }
+
+    local iName = PetTab:CreateInput({
+        Name = "要合成的寵物名稱（例如 ArcticFox，輸入 全部 代表所有）",
+        PlaceholderText = "先按下面的按鈕看背包裡有哪些",
+        Callback = function(text)
+            T.petName = tostring(text or "")
+            notify("已設定", "寵物 = " .. T.petName)
+        end,
+    })
+    regText("petName", iName, function() return T.petName end, function(v) T.petName = v end)
+
+    local dTier = PetTab:CreateDropdown({
+        Name = "合成成",
+        Options = {"Golden", "Rainbow", "Demonic"},
+        CurrentOption = {T.mergeTier},
+        Callback = function(opt)
+            T.mergeTier = type(opt) == "table" and opt[1] or opt
+        end,
+    })
+    regDropdown("mergeTier", dTier, function() return T.mergeTier end, function(v) T.mergeTier = v end)
+
+    addNumber(PetTab, "每次合成幾隻（1-6，探測時看過 5 和 3）", "預設 5", "mergeAmount", 1)
+    addNumber(PetTab, "每次合成間隔（秒）", "預設 0.6", "mergeDelay", 0.2)
+
+    PetTab:CreateButton({
+        Name = "讀取背包（複製各寵物的數量）",
+        Callback = function()
+            local list, err = readPets()
+            if not list then
+                notify("讀取失敗", tostring(err), 6)
+                return
+            end
+            local count = {}
+            for _, p in ipairs(list) do
+                local key = tostring(p.info.name) .. "（" .. tostring(p.info.petType) .. "）"
+                count[key] = (count[key] or 0) + 1
+            end
+            local lines = {}
+            for k, c in pairs(count) do
+                table.insert(lines, k .. " ×" .. c)
+            end
+            table.sort(lines)
+            local text = table.concat(lines, "\n")
+            if setclipboard then pcall(setclipboard, text) end
+            notify("背包", "共 " .. #list .. " 隻，名單已複製到剪貼簿", 5)
+        end,
+    })
+
+    local merging = false
+    local tMerge
+    tMerge = PetTab:CreateToggle({
+        Name = "自動合成寵物（會消耗寵物）",
+        CurrentValue = false,
+        Callback = function(v)
+            S.autoMerge = v
+            if not v or merging then return end
+            merging = true
+            task.spawn(function()
+                local tier = TIERS[T.mergeTier] or TIERS.Golden
+                local amount = math.clamp(math.floor(N.mergeAmount), 1, 6)
+                local name = T.petName
+                local rounds = 0
+                if name == "" then
+                    notify("還沒選寵物", "請先輸入寵物名稱（或輸入 全部）", 6)
+                end
+                while S.autoMerge and name ~= "" and rounds < 300 do
+                    local pets, err = readPets()
+                    if not pets then
+                        status = "讀取背包失敗：" .. tostring(err)
+                        break
+                    end
+                    local groups = {}
+                    for _, p in ipairs(pets) do
+                        local i = p.info
+                        if tostring(i.petType):lower() == tier.from and not i.equipped
+                            and (name == "全部" or i.name == name) then
+                            groups[i.name] = groups[i.name] or {}
+                            table.insert(groups[i.name], p)
+                        end
+                    end
+                    local did = false
+                    for gname, list in pairs(groups) do
+                        if #list >= amount then
+                            local payload = {}
+                            for k = 1, amount do
+                                payload[list[k].id] = list[k].info
+                            end
+                            fire(tier.remote, payload)
+                            rounds += 1
+                            did = true
+                            status = string.format("合成 %s → %s（第 %d 次）", gname, T.mergeTier, rounds)
+                            blog(status)
+                            task.wait(math.max(N.mergeDelay, 0.2))
+                            break
+                        end
+                    end
+                    if not did then
+                        status = "沒有足夠的寵物可以合成了（共合成 " .. rounds .. " 次）"
+                        break
+                    end
+                end
+                merging = false
+                S.autoMerge = false
+                pcall(function() tMerge:Set(false) end)
+            end)
+        end,
+    })
+end
+
+-- ====================================================================
+--  傳送
+-- ====================================================================
+TpTab:CreateSection("傳送到世界")
+do
+    -- TeleportEvent:InvokeServer("Teleport", 世界編號)（探測時看過 1、5、8）
+    local opts = {}
+    for i = 1, 12 do
+        table.insert(opts, tostring(i))
+    end
+    local dTp = TpTab:CreateDropdown({
+        Name = "選擇世界編號",
+        Options = opts,
+        CurrentOption = {T.teleport},
+        Callback = function(opt)
+            T.teleport = type(opt) == "table" and opt[1] or opt
+        end,
+    })
+    regDropdown("teleport", dTp, function() return T.teleport end, function(v) T.teleport = v end)
+
+    TpTab:CreateButton({
+        Name = "傳送",
+        Callback = function()
+            local n = tonumber(T.teleport)
+            if not n then return end
+            local ok, res = invoke("TeleportEvent", "Teleport", n)
+            blog("傳送 " .. n .. "：" .. tostring(ok) .. " " .. tostring(res))
+            notify("傳送", ok and ("已送出傳送到 " .. n) or ("失敗：" .. tostring(res)), 4)
+        end,
+    })
+end
+
+-- ====================================================================
+--  設定
+-- ====================================================================
+SetTab:CreateSection("效能與雜項")
+do
+    local afkConn
+    local tAfk = addToggle(SetTab, "防掛機", "antiAfk", function(v)
+        if afkConn then
+            afkConn:Disconnect()
+            afkConn = nil
+        end
+        if v then
+            afkConn = LocalPlayer.Idled:Connect(function()
+                local vu = game:GetService("VirtualUser")
+                vu:CaptureController()
+                vu:ClickButton2(Vector2.new())
+            end)
+        end
+    end)
+    regToggle("antiAfk", tAfk, function() return S.antiAfk end)
+
+    local t3d = addToggle(SetTab, "關閉 3D 渲染（省電、省效能，畫面會變黑）", "no3d", function(v)
+        pcall(function() RunService:Set3dRenderingEnabled(not v) end)
+    end)
+
+    local fogBackup
+    local tFog = addToggle(SetTab, "去除霧", "noFog", function(v)
+        if v then
+            fogBackup = fogBackup or {Lighting.FogStart, Lighting.FogEnd}
+            Lighting.FogStart = 1e8
+            Lighting.FogEnd = 1e9
+            for _, d in ipairs(Lighting:GetChildren()) do
+                if d:IsA("Atmosphere") then d.Density = 0 end
+            end
+        elseif fogBackup then
+            Lighting.FogStart, Lighting.FogEnd = fogBackup[1], fogBackup[2]
+        end
+    end)
+
+    local tLow = addToggle(SetTab, "低畫質", "lowQuality", function(v)
+        pcall(function()
+            settings().Rendering.QualityLevel = v and Enum.QualityLevel.Level01 or Enum.QualityLevel.Automatic
+        end)
+    end)
+
+    SetTab:CreateButton({
+        Name = "重生角色",
+        Callback = function()
+            local hum = getHumanoid()
+            if hum then hum.Health = 0 end
+        end,
+    })
+end
+
+SetTab:CreateSection("設定檔")
+SetTab:CreateButton({Name = "儲存設定", Callback = function() saveConfig() end})
+SetTab:CreateButton({Name = "載入設定", Callback = function() loadConfig(false) end})
+SetTab:CreateButton({
+    Name = "隱藏視窗（會出現可拖曳的小按鈕）",
+    Callback = function() UI:SetVisibility(false) end,
+})
+
+-- ===== 關閉視窗時：停掉所有功能、還原畫面設定 =====
+local alive = true
+UI:OnClose(function()
+    alive = false
+    for k in pairs(S) do
+        S[k] = false
+    end
+    pcall(function() RunService:Set3dRenderingEnabled(true) end)
+end)
+
+-- 對外：讓主腳本的按鈕可以重新叫出這個視窗
+env.KaiPunchSim = {
+    alive = function() return alive end,
+    show = function() UI:SetVisibility(true) end,
+}
+
+-- 啟動時自動套用上次存的設定
+loadConfig(true)
+
+notify("拳擊模擬器 AFK", "載入完成", 3)
