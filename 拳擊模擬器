@@ -6,7 +6,7 @@
 --   農場：自動訓練 / 自動戰鬥（按畫面左下角的按鈕）、自動點擊(試驗)、
 --         自動領遊玩禮物 ✔、自動領礦工 ✔、撿取範圍內掉落物(試驗)、
 --         自動飛升(試驗)、自動轉盤(試驗)
---   孵蛋：自動孵蛋 ✔、瞬間開蛋、清除開蛋動畫殘留（避免越開越卡）
+--   孵蛋：自動孵蛋 ✔、瞬間開蛋、清除開蛋動畫殘留（介面 + 3D 寵物）
 --   商店：自動買裝備 ✔、自動許願 ✔（大願已驗證，小/中願名稱是猜的）、
 --         自動裝備最佳寵物(試驗)
 --   寵物：自動合成寵物（金色 ✔ / 彩虹、惡魔為依樣畫葫蘆）
@@ -191,6 +191,7 @@ local T = {         -- 文字 / 選項設定
     mergeTier = "Golden",
     teleport = "1",
 }
+local H = {last = 0}   -- 最近一次孵蛋的時間（清除開蛋殘留時用來判斷）
 local status = "--"
 local logBuf = {}
 local function blog(s)
@@ -503,6 +504,7 @@ do
     end
 
     local function hatchOnce()
+        H.last = tick()
         local egg = (T.eggCustom ~= "" and T.eggCustom) or T.egg
         if S.eggTeleport then
             local vend = dig(workspace, "EggVendors", egg)
@@ -541,6 +543,7 @@ end
 
 EggTab:CreateSection("開蛋動畫（避免越開越卡）")
 do
+    -- ---------- 一、介面殘留（PetOpenUI 裡長出來的東西）----------
     -- 記下開蛋介面「原本就有」的東西，之後新長出來的（動畫複製品）過一陣子就清掉
     local baseline = {}
     local born = {}
@@ -585,20 +588,167 @@ do
         end
     end
 
-    addToggle(EggTab, "清除開蛋動畫殘留", "cleanHatch")
+    -- ---------- 二、3D 寵物殘留（開蛋時出現在鏡頭前、會一直疊在畫面上的寵物模型）----------
+    -- 做法：孵蛋期間，凡是新長出來的「頭上有名字標籤（BillboardGui）」的模型，都登記起來，
+    -- 動畫播完（或超過 8 秒）後刪掉。玩家角色、有 Humanoid 的模型都不會碰。
+    local tracked = {}      -- [模型] = 出生時間
+    local removed3d = 0
+    local loggedN = 0
+    local watchConn = nil
+
+    local RARITY_WORDS = {"普通", "罕見", "稀有", "史詩", "傳說", "傳奇", "神話", "Common", "Uncommon", "Rare", "Epic", "Legendary", "Mythic"}
+
+    local function inHatchWindow()
+        if tick() - H.last < 12 then return true end
+        local ui = dig(getPg(), "PetOpenUI")
+        return ui ~= nil and ui.Enabled
+    end
+
+    local function ownerOf(g)
+        local m = g:FindFirstAncestorOfClass("Model")
+        if m then return m end
+        local p = g.Parent
+        if p and p ~= workspace and p ~= workspace.CurrentCamera then
+            return p
+        end
+        return nil
+    end
+
+    local function isCharacter(o)
+        if Players:GetPlayerFromCharacter(o) then return true end
+        if o:FindFirstChildOfClass("Humanoid") then return true end
+        local m = o:FindFirstAncestorOfClass("Model")
+        if m and Players:GetPlayerFromCharacter(m) then return true end
+        return false
+    end
+
+    local function onAdded(d)
+        if not d:IsA("BillboardGui") then return end
+        if not S.cleanHatch or not inHatchWindow() then return end
+        local o = ownerOf(d)
+        if not o or tracked[o] or isCharacter(o) then return end
+        tracked[o] = tick()
+        if loggedN < 12 then
+            loggedN += 1
+            blog("偵測到開蛋 3D 物件：" .. o:GetFullName())
+        end
+    end
+
+    local function setWatch(on)
+        if on and not watchConn then
+            watchConn = workspace.DescendantAdded:Connect(function(d)
+                pcall(onAdded, d)
+            end)
+        elseif not on and watchConn then
+            watchConn:Disconnect()
+            watchConn = nil
+        end
+    end
+
+    local function clean3d(maxAge)
+        local now = tick()
+        local ui = dig(getPg(), "PetOpenUI")
+        local uiOn = ui ~= nil and ui.Enabled
+        for o, t in pairs(tracked) do
+            if not o.Parent then
+                tracked[o] = nil
+            else
+                local age = now - t
+                -- 動畫介面還開著時先別刪（避免弄壞正在播的動畫），但最多等 8 秒
+                if age >= maxAge and (maxAge == 0 or not uiOn or age >= 8) then
+                    tracked[o] = nil
+                    pcall(function() o:Destroy() end)
+                    removed3d += 1
+                end
+            end
+        end
+    end
+
+    -- 掃描式清除（試驗）：清掉鏡頭底下的東西，以及鏡頭附近「名字標籤有稀有度文字」的模型
+    local function hasRarityText(g)
+        for _, t in ipairs(g:GetDescendants()) do
+            if t:IsA("TextLabel") then
+                for _, w in ipairs(RARITY_WORDS) do
+                    if has(t.Text, w) then return true end
+                end
+            end
+        end
+        return false
+    end
+
+    local function sweepNearby()
+        local cam = workspace.CurrentCamera
+        if not cam then return 0 end
+        local n = 0
+        local seen = {}
+        local vendors = workspace:FindFirstChild("EggVendors")
+        for _, d in ipairs(workspace:GetDescendants()) do
+            if d:IsA("BillboardGui") and not (vendors and d:IsDescendantOf(vendors)) then
+                local o = ownerOf(d)
+                if o and not seen[o] and o.Parent and not isCharacter(o) and hasRarityText(d) then
+                    seen[o] = true
+                    local pos
+                    if o:IsA("Model") then
+                        pos = o:GetPivot().Position
+                    elseif o:IsA("BasePart") then
+                        pos = o.Position
+                    end
+                    if pos and (pos - cam.CFrame.Position).Magnitude <= 200 then
+                        pcall(function() o:Destroy() end)
+                        n += 1
+                    end
+                end
+            end
+        end
+        -- 鏡頭底下多出來的模型 / 零件
+        for _, c in ipairs(cam:GetChildren()) do
+            if c:IsA("Model") or c:IsA("BasePart") then
+                pcall(function() c:Destroy() end)
+                n += 1
+            end
+        end
+        removed3d += n
+        return n
+    end
+
+    S.cleanHatch = true   -- 預設開啟
+    EggTab:CreateToggle({
+        Name = "清除開蛋動畫殘留（含 3D 寵物）",
+        CurrentValue = true,
+        Callback = function(v)
+            S.cleanHatch = v
+            setWatch(v)
+        end,
+    })
+    setWatch(true)
+
     addNumber(EggTab, "動畫保留幾秒後清除", "預設 3，越小越乾淨，但太小會把正在播的動畫弄壞", "cleanAge", 0.5)
     addToggle(EggTab, "瞬間開蛋（開完立刻關掉開蛋畫面）", "instantOpen")
-    every("cleanHatch", function() return 1 end, function()
+    every("cleanHatch", function() return 0.5 end, function()
         clean(N.cleanAge)
+        clean3d(N.cleanAge)
     end)
 
     EggTab:CreateButton({
         Name = "立刻清除全部殘留",
         Callback = function()
             clean(0)
-            notify("開蛋動畫", "已清除，累計清掉 " .. removed .. " 個物件", 4)
+            clean3d(0)
+            notify("開蛋動畫", "已清除，累計清掉 " .. removed .. " 個介面物件、" .. removed3d .. " 個 3D 物件", 4)
         end,
     })
+
+    EggTab:CreateButton({
+        Name = "掃描並清除鏡頭附近的寵物殘留（試驗）",
+        Callback = function()
+            local ok, n = pcall(sweepNearby)
+            notify("掃描清除", ok and ("已清掉 " .. tostring(n) .. " 個物件") or ("失敗：" .. tostring(n)), 4)
+        end,
+    })
+
+    UI:OnClose(function()
+        setWatch(false)
+    end)
 end
 
 -- ====================================================================
