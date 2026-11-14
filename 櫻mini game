@@ -1,6 +1,6 @@
 -- ====================================================================
 --  櫻 mini game AFK（獨立的第二個介面）
---  功能：自動撿花（走過去）、自動翻機器人
+--  左邊分頁：自動撿花 / 自動翻機器人 / 每日小農場 / 悠閒釣魚 / 熔岩攀爬 / 21 點 / 設定
 --  移動方式：改用玩家螢幕上的搖桿移動（遊戲的移動由伺服器控制，直接叫角色走會被拉回原地）
 --  介面庫與主腳本共用同一個「卡依ui」，但會開成獨立的第二個視窗
 -- ====================================================================
@@ -460,9 +460,19 @@ local Window = UI:CreateWindow({
     Theme = "black",  -- 額外的介面一律用純黑主題
 })
 
-local AfkTab = Window:CreateTab("掛機")
+-- 左邊的分類分頁（順序就是左邊選單的順序）
+local PetalTab = Window:CreateTab("自動撿花")
+local RobotTab = Window:CreateTab("自動翻機器人")
+local FarmTab = Window:CreateTab("每日小農場")
+local FishTab = Window:CreateTab("悠閒釣魚")
+local LavaTab = Window:CreateTab("熔岩攀爬")
+local BjTab = Window:CreateTab("21 點")
+local SetTab = Window:CreateTab("設定")
 
-AfkTab:CreateSection("移動方式")
+-- ========== 自動撿花（含移動方式）==========
+local AfkTab = PetalTab
+
+AfkTab:CreateSection("移動方式（撿花、翻機器人都會用）")
 
 local dMove = AfkTab:CreateDropdown({
     Name = "移動方式",
@@ -1062,7 +1072,8 @@ do
     })
 end
 
--- ========== 翻機器人 ==========
+-- ========== 自動翻機器人 ==========
+local AfkTab = RobotTab
 AfkTab:CreateSection("翻機器人")
 
 do
@@ -1361,11 +1372,13 @@ do
         flipOn = false
     end)
 end
+
 -- ====================================================================
---  每日小農場自動化（貼進「櫻mini game」，放在「-- ===== 設定 =====」那一段的前面）
+--  每日小農場
 --  做法：直接觸發農場畫面上的按鈕，不需要知道 FarmEvent 的參數
 --  不會按任何 Robux 解鎖或解鎖田地的按鈕
 -- ====================================================================
+local AfkTab = FarmTab
 AfkTab:CreateSection("每日小農場")
 
 do
@@ -1660,12 +1673,13 @@ do
         farmOn = false
     end)
 end
+
 -- ====================================================================
---  悠閒釣魚自動化（貼進「櫻mini game」，放在小農場那一段的後面、
---  「-- ===== 設定 =====」的前面）
+--  悠閒釣魚自動化
 --  做法：讀取 FishingGui 畫面上的文字和進度條，用空白鍵（或按鈕事件）
 --  模擬「按住 / 放開」。不會自己打開釣魚畫面，請先把畫面打開
 -- ====================================================================
+local AfkTab = FishTab
 AfkTab:CreateSection("悠閒釣魚")
 
 do
@@ -2122,17 +2136,20 @@ do
         conn:Disconnect()
     end)
 end
+
 -- ====================================================================
---  熔岩攀爬 自動攀爬 第一版（貼進「櫻mini game」，放在釣魚那一段的後面、
---  「-- ===== 設定 =====」的前面）
+--  熔岩攀爬 自動攀爬 第三版
 --
---  做法：讀取賽道上每個平台、鋸刃的即時位置，一個平台一個平台往上跳
---  - 已測量：角色 18×24、走路 75px/s、最高跳 72px、蓄力 0.4 秒左右蓄滿
---  - 還沒測到的（腳本會邊跳邊學）：跳躍時往左右飄多遠、空中能不能轉向、
---    平台是不是實心（會不會撞頭）
---  - 平台落差超過最大跳躍高度時，腳本會停下來並回報卡在哪
---  - 控制方式預設用鍵盤（A / D / 空白鍵），不用你的手指
+--  這版的重點：平台是實心的（會撞頭、會撞側邊），所以每一跳都先在腳本裡
+--  模擬一遍軌跡 —— 角色矩形 vs 所有平台、鋸刃、移動平台 —— 挑一個
+--  「不會撞到、而且會落在目標平台上」的起跳位置、蓄力時間和方向。
+--  實際跳的時候，如果空中可以轉向，還會在爬升階段先停住水平移動，
+--  等高過目標平台再飄進去。
+--
+--  已測量：角色 18×24、平台厚 12、走路 75px/s、最高跳 72px
+--  邊跳邊學：水平速度、空中能不能轉向、高度係數
 -- ====================================================================
+local AfkTab = LavaTab
 AfkTab:CreateSection("熔岩攀爬")
 
 do
@@ -2140,10 +2157,10 @@ do
     local RunService = game:GetService("RunService")
     local GuiService = game:GetService("GuiService")
 
-    -- ===== 從探測紀錄量到的物理常數 =====
     local PW, PH = 18, 24             -- 角色寬高
+    local PLAT_T = 12                 -- 平台厚度
     local G_UP, G_DOWN = 1200, 1050   -- 上升 / 下降重力 px/s²
-    local SAW_MIN, SAW_MAX = 0, 464   -- 鋸刃來回範圍
+    local SAW_MIN, SAW_MAX = 0, 464
 
     local climbOn = false
     local method = "鍵盤"
@@ -2153,16 +2170,14 @@ do
     local runStart = tick()
     local toggleHandle
 
-    local lvl                          -- 目前賽道
+    local lvl
     local ps = {x = 0, feet = 0, h = PH, still = 0, vx = 0, vy = 0}
     local ended = false
     local keyDown = {}
 
-    -- 邊跳邊學的參數
-    local vxAir = 110                  -- 跳躍時的水平速度（px/s）
-    local rcorr = 1.0                  -- 實際跳躍高度 / 預期高度
-    local airLocked = nil              -- true=起跳後方向被鎖定；false=空中可轉向
-    local solidMode = false            -- 平台疑似實心（撞頭）時改從側邊起跳
+    local vxAir = 110                 -- 跳躍時的水平速度（邊跳邊學）
+    local rcorr = 1.0                 -- 實際跳躍高度 / 預期高度
+    local airLocked = nil             -- true=起跳後方向鎖定；false=空中可轉向
 
     local function has(t, s)
         return t ~= nil and t:find(s, 1, true) ~= nil
@@ -2304,7 +2319,7 @@ do
                 local sx, sy = c.Size.X.Offset, c.Size.Y.Offset
                 local lbl = c:FindFirstChildWhichIsA("TextLabel", true)
                 local txt = lbl and lbl.Text or ""
-                if sy == 12 and sx >= 40 and sx <= 140 then
+                if sy == PLAT_T and sx >= 40 and sx <= 140 then
                     local P = {fr = c, w = sx, top = c.Position.Y.Offset, txt = txt, lastX = c.Position.X.Offset, v = 0}
                     if has(txt, "⇄") then P.kind = "move"
                     elseif has(txt, "▲") then P.kind = "spike"; P.lbl = lbl
@@ -2393,10 +2408,40 @@ do
         end
     end
 
-    -- ===== 規劃 =====
+    -- ===== 物理模型 =====
+    local function riseBase(c)
+        return math.clamp(45 + 135 * (c - 0.17), 20, 72)
+    end
+    local function chargeFor(R)
+        local need = math.min(R / rcorr, 72)
+        if need >= 71 then
+            return 0.42
+        end
+        return math.clamp(0.17 + (need - 45) / 135, 0.03, 0.42)
+    end
+    local function riseAt(t, ap)
+        local v0 = math.sqrt(2 * G_UP * ap)
+        local tUp = v0 / G_UP
+        if t <= tUp then
+            return v0 * t - 0.5 * G_UP * t * t
+        end
+        return ap - 0.5 * G_DOWN * (t - tUp) ^ 2
+    end
+    local function landTime(H, ap)
+        local v0 = math.sqrt(2 * G_UP * ap)
+        return v0 / G_UP + math.sqrt(2 * math.max(ap - H, 0) / G_DOWN)
+    end
+
+    local function sawX(s, t)
+        local span = SAW_MAX - SAW_MIN
+        local rel = (s.lastX + s.v * t - SAW_MIN) % (2 * span)
+        if rel > span then rel = 2 * span - rel end
+        return SAW_MIN + rel
+    end
+
     -- 玩家左緣 x 的安全範圍（完全站在平台上，並避開尖刺）
-    local function safeRanges(P, shift)
-        local x0 = platX(P) + (shift or 0)
+    local function safeRanges(P)
+        local x0 = platX(P)
         local lo, hi = x0 + 2, x0 + P.w - PW - 2
         if hi < lo then
             lo = x0 + P.w / 2 - PW / 2
@@ -2422,94 +2467,110 @@ do
         return list
     end
 
-    local function chooseRoute(A, B, shiftB, variant)
-        local AS, BS = safeRanges(A, 0), safeRanges(B, shiftB)
-        local best
-        for _, a in ipairs(AS) do
-            for _, b in ipairs(BS) do
-                local cand
-                local lo, hi = math.max(a[1], b[1]), math.min(a[2], b[2])
-                if lo <= hi then
-                    -- 水平有重疊：原地垂直跳（疑似實心平台時改從側邊）
-                    local xl = math.clamp(ps.x, lo, hi)
-                    if variant == 2 then
-                        xl = math.clamp((b[1] + b[2]) / 2, lo, hi)
-                    end
-                    cand = {xl = xl, xt = xl, dir = 0, travel = 0, a = a}
-                    if solidMode then
-                        local right, left = b[2] + 22, b[1] - 22
-                        if right <= a[2] then
-                            cand = {xl = right, xt = math.max(b[2] - 3, b[1]), dir = -1, a = a}
-                        elseif left >= a[1] then
-                            cand = {xl = left, xt = math.min(b[1] + 3, b[2]), dir = 1, a = a}
-                        end
-                        cand.travel = math.abs(cand.xt - cand.xl)
-                    end
-                elseif b[1] > a[2] then
-                    local xt = math.min(b[1] + 3, b[2])
-                    cand = {xl = a[2], xt = xt, dir = 1, travel = xt - a[2], a = a}
-                else
-                    local xt = math.max(b[2] - 3, b[1])
-                    cand = {xl = a[1], xt = xt, dir = -1, travel = a[1] - xt, a = a}
+    -- 模擬一跳：回傳 成功?, 落在 B 上的重疊像素, 與 B 的最小水平間距
+    local function simulate(A, B, xl, dir, c, ap, vx, dynamic)
+        local H = A.top - B.top
+        local tL = landTime(H, ap)
+        local near = {}
+        for _, P in ipairs(lvl.plats) do
+            if P ~= A and P ~= B and P.top < A.top + 30 and P.top > A.top - ap - 40 then
+                table.insert(near, P)
+            end
+        end
+        local margin = math.huge
+        for t = 0.02, tL - 0.01, 0.02 do
+            local x = math.clamp(xl + dir * vx * t, 0, 462)
+            local f = A.top - riseAt(t, ap)
+
+            -- 目標平台（實心）：爬升到它的高度之前，水平上不能重疊
+            local bx = platX(B) + ((dynamic and B.kind == "move") and B.v * (c + t) or 0)
+            if f > B.top - 1 and f - PH < B.top + PLAT_T + 3 then
+                local gap = math.max(bx - (x + PW), x - (bx + B.w))
+                if gap < 1.5 then
+                    return false
                 end
-                cand.cost = cand.travel * 3 + math.abs(ps.x - cand.xl) * 0.05
-                if not best or cand.cost < best.cost then
-                    best = cand
+                margin = math.min(margin, gap)
+            end
+
+            -- 其他平台
+            for _, P in ipairs(near) do
+                local px = platX(P) + ((dynamic and P.kind == "move") and P.v * (c + t) or 0)
+                if x + PW > px + 1 and x < px + P.w - 1 then
+                    if f > P.top + 1 and f - PH < P.top + PLAT_T - 1 then
+                        return false
+                    end
+                end
+            end
+
+            -- 鋸刃
+            if dynamic then
+                for _, s in ipairs(lvl.saws) do
+                    if f + 2 > s.y and f - PH - 2 < s.y + 16 then
+                        local sx = sawX(s, c + t)
+                        if sx + 16 + 4 > x and sx - 4 < x + PW then
+                            return false
+                        end
+                    end
+                end
+            end
+        end
+        local xL = math.clamp(xl + dir * vx * tL, 0, 462)
+        local bxL = platX(B) + ((dynamic and B.kind == "move") and B.v * (c + tL) or 0)
+        local ov = math.min(xL + PW, bxL + B.w) - math.max(xL, bxL)
+        return true, ov, margin
+    end
+
+    -- 規劃：在 A 上找一個起跳位置 + 蓄力 + 方向，讓模擬結果不撞、且落在 B
+    local function planJump(A, B, fixedXl, dynamic, triedList, relax)
+        local H = A.top - B.top
+        local vx = math.clamp(vxAir, 60, 220)
+        local cs = {}
+        local c = chargeFor(H + 7)
+        while c < 0.42 do
+            table.insert(cs, c)
+            c += 0.05
+        end
+        table.insert(cs, 0.42)
+
+        local xls = {}
+        if fixedXl then
+            xls = {fixedXl}
+        else
+            for _, r in ipairs(safeRanges(A)) do
+                local x = r[1]
+                while x < r[2] do
+                    table.insert(xls, x)
+                    x += 4
+                end
+                table.insert(xls, r[2])
+            end
+        end
+
+        local best
+        for _, xl in ipairs(xls) do
+            for _, dir in ipairs({1, -1, 0}) do
+                for _, cc in ipairs(cs) do
+                    local ap = riseBase(cc) * rcorr
+                    if ap >= H + 3 then
+                        local ok, ov, margin = simulate(A, B, xl, dir, cc, ap, vx, dynamic)
+                        if ok and ov >= (relax and 3 or 8) then
+                            local m = margin == math.huge and 10 or margin
+                            local score = math.abs(ps.x - xl) * 0.05 + cc * 3 - math.min(m, 10) * 0.8 - math.min(ov, 25) * 0.1
+                            for _, t in ipairs(triedList or {}) do
+                                if t.dir == dir and math.abs(t.xl - xl) < 6 and math.abs(t.c - cc) < 0.03 then
+                                    score += 30
+                                end
+                            end
+                            if not best or score < best.score then
+                                best = {xl = xl, dir = dir, c = cc, ap = ap, ov = ov, margin = m, score = score,
+                                        T = landTime(H, ap)}
+                            end
+                        end
+                    end
                 end
             end
         end
         return best
-    end
-
-    local function riseBase(c)
-        return math.clamp(45 + 135 * (c - 0.17), 20, 72)
-    end
-    local function chargeFor(R)
-        local need = math.min(R / rcorr, 72)
-        if need >= 71 then
-            return 0.42
-        end
-        return math.clamp(0.17 + (need - 45) / 135, 0.03, 0.42)
-    end
-    local function flightTime(H, apex)
-        local v0 = math.sqrt(2 * G_UP * apex)
-        return v0 / G_UP + math.sqrt(2 * math.max(apex - H, 1) / G_DOWN)
-    end
-
-    local function sawX(s, t)
-        local span = SAW_MAX - SAW_MIN
-        local rel = (s.lastX + s.v * t - SAW_MIN) % (2 * span)
-        if rel > span then rel = 2 * span - rel end
-        return SAW_MIN + rel
-    end
-
-    -- 預測這次跳躍會不會撞到鋸刃
-    local function sawConflict(xl, xt, feet0, apex, T, c)
-        local v0 = math.sqrt(2 * G_UP * apex)
-        local tUp = v0 / G_UP
-        local total = c + T + 0.15
-        for t = 0, total, 0.05 do
-            local rise, px = 0, xl
-            if t > c then
-                local tt = t - c
-                if tt <= tUp then
-                    rise = v0 * tt - 0.5 * G_UP * tt * tt
-                else
-                    rise = apex - 0.5 * G_DOWN * (tt - tUp) ^ 2
-                end
-                px = xl + (xt - xl) * math.min(1, tt / math.max(T, 0.1))
-            end
-            local f = feet0 - rise
-            for _, s in ipairs(lvl.saws) do
-                if f + 3 > s.y and f - PH - 3 < s.y + 16 then
-                    local sx = sawX(s, t)
-                    if sx + 16 + 8 > px and sx - 8 < px + PW then
-                        return true
-                    end
-                end
-            end
-        end
-        return false
     end
 
     local function walkTo(A, ofs)
@@ -2539,18 +2600,21 @@ do
     end
 
     -- ===== 一次跳躍 =====
-    local function doJump(A, B, route, c, apex, T, H, idx)
+    local function doJump(A, B, plan, idx)
         local feet0 = ps.feet
-        local dirKey = route.dir > 0 and "R" or "L"
+        local dir, c = plan.dir, plan.c
+        local dirKey = dir > 0 and "R" or "L"
         local tStart = tick()
         local takeoff, minFeet = nil, feet0
-        local dirOn, upReleased, dirReleased = false, false, false
-        local xRel, sumV, nV = nil, 0, 0
+        local dirOn, upReleased = false, false
+        local sumV, nV = 0, 0
+        local tCross, xCross, bxCross
+        local relT, relX, modeChecked = nil, nil, false
         setKey("UP", true)
         while climbOn and not ended do
             RunService.Heartbeat:Wait()
             local el = tick() - tStart
-            if route.dir ~= 0 and not dirOn and el >= c - 0.05 then
+            if dir ~= 0 and not dirOn and el >= c - 0.05 then
                 setKey(dirKey, true)
                 dirOn = true
             end
@@ -2562,19 +2626,44 @@ do
                 takeoff = tick()
             end
             if ps.feet < minFeet then minFeet = ps.feet end
+            if takeoff and not tCross and ps.vy >= 0 and ps.feet >= B.top - 1 and ps.feet <= B.top + 8 then
+                tCross = tick() - takeoff
+                xCross = ps.x
+                bxCross = platX(B)
+            end
             if takeoff then
                 local ta = tick() - takeoff
-                if dirOn and ta > 0.05 and ta < 0.22 then
-                    sumV += ps.vx * route.dir
+                if dirOn and keyDown[dirKey] and ta > 0.05 and ta < 0.22 then
+                    sumV += ps.vx * dir
                     nV += 1
                 end
-                if dirOn and not dirReleased then
-                    local reached = (route.dir > 0 and ps.x >= route.xt) or (route.dir < 0 and ps.x <= route.xt)
-                    if reached then
-                        setKey(dirKey, false)
-                        dirReleased = true
-                        xRel = ps.x
+                -- 空中閘門：高度還沒超過目標平台前，離它太近就先停下水平移動
+                if dirOn and airLocked ~= true then
+                    local bx = platX(B)
+                    local cleared = ps.feet <= B.top - 1
+                    local gap
+                    if dir > 0 then
+                        gap = (bx - 2) - (ps.x + PW)
+                    else
+                        gap = ps.x - (bx + B.w + 2)
                     end
+                    local overlap = math.min(ps.x + PW, bx + B.w) - math.max(ps.x, bx)
+                    local want = cleared or gap > 5
+                    if cleared and overlap >= 14 and ps.vy > 0 then
+                        want = false
+                    end
+                    if (keyDown[dirKey] == true) ~= want then
+                        setKey(dirKey, want)
+                        if not want then
+                            relT, relX = tick(), ps.x
+                        else
+                            relT = nil
+                        end
+                    end
+                end
+                if relT and not modeChecked and tick() - relT >= 0.12 then
+                    modeChecked = true
+                    airLocked = ((ps.x - relX) * dir) > 8
                 end
                 if ta > 0.3 and ps.still >= 4 and platformUnder() then
                     break
@@ -2587,26 +2676,26 @@ do
         local apexM = feet0 - minFeet
         local airT = takeoff and (tick() - takeoff) or 0
 
-        -- 學習
+        local bumped = false
         if takeoff then
-            if dirReleased and xRel then
-                local cont = (ps.x - xRel) * route.dir
-                if cont > 6 then airLocked = true elseif cont < 3 then airLocked = false end
-            end
             if nV >= 4 then
                 local vm = sumV / nV
                 if vm > 20 then vxAir = 0.5 * vxAir + 0.5 * vm end
             end
-            if apexM >= apex - 8 then
+            if apexM >= plan.ap - 8 then
                 rcorr = math.clamp(0.6 * rcorr + 0.4 * (apexM / riseBase(c)), 0.85, 1.15)
-            elseif route.travel == 0 and H < 66 then
-                solidMode = true
-                blog("疑似撞頭（上升 " .. apexM .. " < 預期 " .. math.floor(apex) .. "），改從側邊起跳")
+            else
+                bumped = true
             end
         end
-        blog(string.format("#%d→#%d H=%d 蓄力%.2f 預期上升%d 實際%d 移動%d 方向%d 滯空%.2f 落在=%s",
-            idx, idx + 1, H, c, apex, apexM, route.travel, route.dir, airT,
-            landed and (landed == B and "目標" or ("平台高度" .. -landed.top)) or "未著地"))
+        local bc = B.fr.BackgroundColor3
+        blog(string.format("#%d→#%d H=%d 蓄力%.2f 方向%d 起跳x=%d 預期上升%d 實際%d%s 滯空%.2f 落在=%s｜模擬重疊%d 間距%d｜B=%s%s 寬%d 色(%d,%d,%d)｜到B高度 t=%s 玩家x=%s B.x=%s",
+            idx, idx + 1, A.top - B.top, c, dir, plan.xl, plan.ap, apexM, bumped and "（撞頭）" or "", airT,
+            landed and (landed == B and "目標" or ("平台高度" .. -landed.top)) or "未著地",
+            plan.ov, plan.margin, B.kind, B.txt ~= "" and ("(" .. B.txt .. ")") or "", B.w,
+            bc.R * 255, bc.G * 255, bc.B * 255,
+            tCross and string.format("%.2f", tCross) or "沒到",
+            xCross and tostring(xCross) or "-", bxCross and tostring(bxCross) or "-"))
         return takeoff ~= nil, landed
     end
 
@@ -2619,7 +2708,7 @@ do
     end
 
     local function climb()
-        local fails, nojump = {}, 0
+        local fails, nojump, tried = {}, 0, {}
         while climbOn and not ended do
             local A = waitGrounded(6)
             if not A then
@@ -2634,46 +2723,42 @@ do
             if not B then
                 return "goal"
             end
-            local variant = fails[B] or 0
-            if variant >= 6 then
-                return "stuck", string.format("卡在第 %d→%d 個平台（高度差 %d、水平差約 %d）；最大跳躍約 72px，水平速度約 %.0f px/s。請把狀態按鈕的紀錄貼給我",
-                    idx, idx + 1, A.top - B.top, math.abs(platX(B) - platX(A)), vxAir)
-            end
             local H = A.top - B.top
-            local R = H + 7 + (variant == 1 and 6 or 0)
-            local c = chargeFor(R)
-            local apex = riseBase(c) * rcorr
-            if H > 70 then
-                blog(string.format("警告：第 %d→%d 個平台高度差 %d 超過最大跳躍 72", idx, idx + 1, H))
+            if H > 72 then
+                return "stuck", string.format("第 %d→%d 個平台高度差 %d 超過最大跳躍約 72，這個落差跳不上去（目標平台類型 %s）。請把狀態按鈕的紀錄貼給我",
+                    idx, idx + 1, H, B.kind)
             end
-            local T = flightTime(math.min(H, apex - 1), apex)
-            local lead = (B.kind == "move") and (c + T) or 0
-            local route = chooseRoute(A, B, B.v * lead, variant)
-            if not route then
-                return "stuck", "找不到可站的位置"
+            if (fails[B] or 0) >= 6 then
+                return "stuck", string.format("卡在第 %d→%d 個平台（高度差 %d、目標平台類型 %s%s）。請把狀態按鈕的紀錄貼給我",
+                    idx, idx + 1, H, B.kind, B.txt ~= "" and ("，文字 " .. B.txt) or "")
             end
-            -- 方向被鎖定時，依水平速度把起跳點往後退，讓落點剛好在目標上
-            if route.travel > 0 and airLocked == true then
-                local reach = vxAir * T
-                route.xl = math.clamp(route.xt - route.dir * reach, route.a[1], route.a[2])
-                route.travel = math.abs(route.xt - route.xl)
-            end
+            tried[B] = tried[B] or {}
 
+            -- 1. 靜態規劃（不看會動的東西），決定要走到哪裡起跳
+            local plan = planJump(A, B, nil, false, tried[B]) or planJump(A, B, nil, false, tried[B], true)
+            if not plan then
+                fails[B] = (fails[B] or 0) + 1
+                blog(string.format("#%d→#%d 找不到不會撞到的跳法（第 %d 次）", idx, idx + 1, fails[B]))
+                task.wait(0.3)
+                continue
+            end
             setStatus("走到起跳點", idx)
-            walkTo(A, route.xl - platX(A))
+            walkTo(A, plan.xl - platX(A))
 
-            -- 等鋸刃的空檔
-            local waited = tick()
+            -- 2. 走到之後，考慮鋸刃和移動平台，等到有空檔再跳
+            local plan2
+            local tw = tick()
             while climbOn and not ended do
-                local hit = sawConflict(ps.x, route.xt, ps.feet, apex, T, c)
-                if not hit or tick() - waited > 8 then break end
-                setStatus("等鋸刃空檔", idx)
+                plan2 = planJump(A, B, ps.x, true, tried[B])
+                if plan2 or tick() - tw > 10 then break end
+                setStatus("等空檔（鋸刃/移動平台）", idx)
                 RunService.Heartbeat:Wait()
             end
             if not climbOn or ended then break end
+            plan2 = plan2 or plan
 
             setStatus("跳躍", idx)
-            local didJump, landed = doJump(A, B, route, c, apex, T, H, idx)
+            local didJump, landed = doJump(A, B, plan2, idx)
             if not didJump then
                 nojump += 1
                 if nojump >= 3 then
@@ -2683,7 +2768,7 @@ do
                 nojump = 0
                 if landed ~= B and not (landed and landed.top < A.top) then
                     fails[B] = (fails[B] or 0) + 1
-                    if fails[B] == 3 then solidMode = not solidMode end
+                    table.insert(tried[B], {xl = plan2.xl, dir = plan2.dir, c = plan2.c})
                 end
             end
             task.wait(0.05)
@@ -2824,9 +2909,9 @@ do
         conn:Disconnect()
     end)
 end
+
 -- ====================================================================
---  21 點 Blackjack（貼進「櫻mini game」，放在其他區段後面、
---  「-- ===== 設定 =====」的前面）
+--  21 點 Blackjack
 --
 --  做法：只讀取畫面上的牌和文字，再用「要牌 / 停牌」按鈕操作
 --  - 狀態按鈕會一直顯示建議（要牌或停牌），不開自動也能當提示用
@@ -2835,6 +2920,7 @@ end
 --  - 策略是只有「要牌 / 停牌」可選時的基本策略。注意這個遊戲平手算莊家贏，
 --    長期期望值還是偏負，所以預設只玩 20 局就停
 -- ====================================================================
+local AfkTab = BjTab
 AfkTab:CreateSection("21 點 Blackjack")
 
 do
@@ -3053,202 +3139,4 @@ do
             lastS, lastSChange = sText, now
             roundLogged = false
         end
-        if bal ~= lastBal then
-            blog("餘額 " .. (bal and commas(bal) or "?"))
-            lastBal = bal
-        end
-        if not turn and not roundLogged and now - lastSChange > 1 and #pr > 0 then
-            blog(string.format("這一局：你=%s（%d）莊家=%s", table.concat(pr, ","), total, table.concat(dr, ",")))
-            roundLogged = true
-        end
-
-        if #pr > 0 then
-            status = string.format("你 %d%s vs 莊家 %s｜%s｜局數 %d/%d｜餘額 %s",
-                total, soft and "（軟）" or "", dr[1] or "?",
-                advice and ("建議：" .. (advice == "HIT" and "要牌" or "停牌")) or sText,
-                rounds, maxRounds, bal and commas(bal) or "?")
-        else
-            status = string.format("%s｜局數 %d/%d｜餘額 %s", sText ~= "" and sText or "等待開局", rounds, maxRounds, bal and commas(bal) or "?")
-        end
-
-        -- 自動要牌 / 停牌
-        if autoPlay and turn and advice and now - lastAct > 0.8 then
-            local key = #pr .. ":" .. total
-            if key ~= lastKey or now - lastAct > 3 then
-                local b = findButton(main, function(t)
-                    return has(t, advice == "HIT" and "要牌" or "停牌")
-                end)
-                if b and shown(b) then
-                    click(b)
-                    lastKey, lastAct = key, now
-                    blog(string.format("%d%s vs %s → %s", total, soft and "軟" or "", dr[1] or "?", advice))
-                end
-            end
-        end
-
-        -- 自動開始下一局
-        if autoStart and not turn and now - lastSChange > 1.2 and now - lastStart > 3 then
-            if rounds >= maxRounds then
-                stopAuto("已達最大局數 " .. maxRounds)
-            elseif bal and (bal < stopBelow or bal < betChoice) then
-                stopAuto("餘額 " .. commas(bal) .. " 低於停止線或下注金額")
-            else
-                local startBtn = findButton(main, function(t) return has(t, "開始遊戲") end)
-                if startBtn and shown(startBtn) then
-                    if not has(startBtn.Text, commas(betChoice)) then
-                        local chip = findButton(main, function(t)
-                            return (t:gsub(",", "")) == tostring(betChoice)
-                        end)
-                        if chip then
-                            click(chip)
-                            lastStart = now - 2.4
-                        else
-                            stopAuto("找不到下注金額 " .. betChoice .. " 的籌碼")
-                        end
-                    else
-                        click(startBtn)
-                        rounds += 1
-                        lastStart = now
-                        blog("開始第 " .. rounds .. " 局，下注 " .. betChoice)
-                    end
-                end
-            end
-        end
-    end
-
-    task.spawn(function()
-        while true do
-            task.wait(0.25)
-            local ok, err = pcall(step)
-            if not ok then
-                status = "錯誤：" .. tostring(err)
-            end
-        end
-    end)
-
-    -- ===== 介面 =====
-    AfkTab:CreateToggle({
-        Name = "自動要牌/停牌（按建議）", CurrentValue = false,
-        Callback = function(v) autoPlay = v end,
-    })
-    -- 不存檔：避免下次載入設定時自己開始花🌸
-
-    startToggle = AfkTab:CreateToggle({
-        Name = "自動開始下一局（會花🌸）", CurrentValue = false,
-        Callback = function(v)
-            autoStart = v
-            if v then
-                rounds = 0
-                runStart = tick()
-            end
-        end,
-    })
-
-    local BETS = {"100", "300", "500", "1000", "2000", "3000"}
-    local dBet = AfkTab:CreateDropdown({
-        Name = "每局下注金額",
-        Options = BETS,
-        CurrentOption = {tostring(betChoice)},
-        Callback = function(opt)
-            local s = type(opt) == "table" and opt[1] or opt
-            local n = tonumber(s)
-            if n then betChoice = n end
-        end,
-    })
-    regDropdown("bjBet", dBet, function() return tostring(betChoice) end, function(v)
-        betChoice = tonumber(v) or betChoice
-    end)
-
-    local iRounds = AfkTab:CreateInput({
-        Name = "最多玩幾局（預設 20）",
-        PlaceholderText = "例如 20",
-        Callback = function(text)
-            local n = tonumber(text)
-            if n and n >= 1 then
-                maxRounds = math.floor(n)
-                notify("已設定", "最多 " .. maxRounds .. " 局")
-            else
-                notify("輸入錯誤", "請輸入 1 以上的整數")
-            end
-        end,
-    })
-    regNumber("bjRounds", iRounds, function() return maxRounds end, function(v)
-        maxRounds = v
-    end)
-
-    local iStop = AfkTab:CreateInput({
-        Name = "餘額低於多少就停止（預設 0）",
-        PlaceholderText = "例如 1000",
-        Callback = function(text)
-            local n = tonumber((text:gsub(",", "")))
-            if n and n >= 0 then
-                stopBelow = n
-                notify("已設定", "餘額低於 " .. commas(n) .. " 停止")
-            else
-                notify("輸入錯誤", "請輸入數字")
-            end
-        end,
-    })
-    regNumber("bjStopBelow", iStop, function() return stopBelow end, function(v)
-        stopBelow = v
-    end)
-
-    local statusBtn = AfkTab:CreateButton({
-        Name = "21點狀態  --",
-        Callback = function()
-            if setclipboard then
-                pcall(setclipboard, table.concat(logBuf, "\n"))
-            end
-            notify("21 點", status, 4)
-        end,
-    })
-    task.spawn(function()
-        while true do
-            statusBtn:SetName("21點狀態  " .. status)
-            task.wait(0.3)
-        end
-    end)
-
-    UI:OnClose(function()
-        autoPlay, autoStart = false, false
-    end)
-end
-
--- ===== 設定 =====
-AfkTab:CreateSection("設定")
-
-AfkTab:CreateButton({
-    Name = "儲存設定",
-    Callback = function()
-        saveConfig()
-    end,
-})
-
-AfkTab:CreateButton({
-    Name = "載入設定",
-    Callback = function()
-        loadConfig(false)
-    end,
-})
-
-AfkTab:CreateButton({
-    Name = "隱藏視窗（會出現可拖曳的小按鈕）",
-    Callback = function()
-        UI:SetVisibility(false)
-    end,
-})
-
--- 對外：讓主腳本的按鈕可以重新叫出這個視窗
-local alive = true
-UI:OnClose(function()
-    alive = false
-end)
-env.KaiSakuraAFK = {
-    alive = function() return alive end,
-    show = function() UI:SetVisibility(true) end,
-}
-
--- 啟動時自動套用上次存的設定
-loadConfig(true)
-
-notify("櫻 mini game AFK", "載入完成", 3)
+        if ba
