@@ -46,13 +46,13 @@ pre{background:rgba(241,239,232,.7)}
 h1{display:inline-block;padding:6px 18px;border-radius:12px;background:rgba(255,255,255,.55);-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px)}
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]) h1{background:rgba(38,37,34,.55)}}
 :root[data-theme="dark"] h1{background:rgba(38,37,34,.55)}
-#snd{position:fixed;right:14px;bottom:calc(14px + env(safe-area-inset-bottom,0px));z-index:5;border-radius:999px;padding:10px 16px;background:rgba(255,255,255,.7);-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px)}
-@media (prefers-color-scheme:dark){:root:not([data-theme="light"]) #snd{background:rgba(38,37,34,.7)}}
-:root[data-theme="dark"] #snd{background:rgba(38,37,34,.7)}
+#snd{position:fixed;right:14px;bottom:calc(14px + env(safe-area-inset-bottom,0px));z-index:10;width:46px;height:46px;border-radius:50%;padding:0;font-size:1.3rem;line-height:1;background:rgba(255,255,255,.55);-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]) #snd{background:rgba(38,37,34,.55)}}
+:root[data-theme="dark"] #snd{background:rgba(38,37,34,.55)}
 </style>
 </head>
 <body>
-<video id="bgv" src="kai_video.mp4" autoplay muted loop playsinline disablepictureinpicture aria-hidden="true"></video>
+<video id="bgv" src="bg.mp4" autoplay loop playsinline disablepictureinpicture aria-hidden="true"></video>
 <main>
 <h1>📜 卡依腳本庫</h1>
 <div class="bar"><input id="q" placeholder="搜尋標題或內容…"><button class="p" id="add">＋新增</button></div>
@@ -64,6 +64,7 @@ h1{display:inline-block;padding:6px 18px;border-radius:12px;background:rgba(255,
 </div>
 <div id="list"></div>
 </main>
+<button id="snd" aria-label="開關聲音" title="開關聲音">🔇</button>
 <script>
 var KEY="my-scripts-v4",items=[],editing=null;
 var seed=[{id:4,t:"拳擊探測器",g:"Lua",c:"loadstring(game:HttpGet('https://raw.githubusercontent.com/Kai090898/Kai-script/refs/heads/main/%E6%8B%B3%E6%93%8A%E6%8E%A2%E6%B8%AC%E5%99%A8'))();"},{id:3,t:"拳擊模擬器",g:"Lua",c:"loadstring(game:HttpGet('https://raw.githubusercontent.com/Kai090898/Kai-script/refs/heads/main/%E6%8B%B3%E6%93%8A%E6%A8%A1%E6%93%AC%E5%99%A8'))();"},{id:2,t:"主腳本",g:"Lua",c:"loadstring(game:HttpGet('https://raw.githubusercontent.com/Kai090898/Kai-script/refs/heads/main/%E6%9C%B5%E6%8B%89%E6%98%AF%E7%94%B2'))();"},{id:1,t:"櫻mini game",g:"Lua",c:"loadstring(game:HttpGet('https://raw.githubusercontent.com/Kai090898/Kai-script/refs/heads/main/%E6%AB%BBmini%20game'))();"},{id:8,t:"拳擊探測器（連結）",g:"連結",c:"https://raw.githubusercontent.com/Kai090898/Kai-script/refs/heads/main/%E6%8B%B3%E6%93%8A%E6%8E%A2%E6%B8%AC%E5%99%A8"},{id:7,t:"拳擊模擬器（連結）",g:"連結",c:"https://raw.githubusercontent.com/Kai090898/Kai-script/refs/heads/main/%E6%8B%B3%E6%93%8A%E6%A8%A1%E6%93%AC%E5%99%A8"},{id:6,t:"主腳本（連結）",g:"連結",c:"https://raw.githubusercontent.com/Kai090898/Kai-script/refs/heads/main/%E6%9C%B5%E6%8B%89%E6%98%AF%E7%94%B2"},{id:5,t:"櫻mini game（連結）",g:"連結",c:"https://raw.githubusercontent.com/Kai090898/Kai-script/refs/heads/main/%E6%AB%BBmini%20game"}];
@@ -98,11 +99,19 @@ document.getElementById("list").onclick=function(e){
 };
 document.getElementById("c").onkeydown=function(e){if(e.key==="Tab"){e.preventDefault();var s=this.selectionStart;this.value=this.value.slice(0,s)+"    "+this.value.slice(this.selectionEnd);this.selectionStart=this.selectionEnd=s+4}};
 render();
-</script>
-<button id="snd" type="button">🔇 開啟聲音</button>
-<script>
-(function(){var v=document.getElementById("bgv"),b=document.getElementById("snd");
-b.onclick=function(){v.muted=!v.muted;v.volume=0.6;if(!v.muted){var p=v.play();if(p&&p.catch)p.catch(function(){})}b.textContent=v.muted?"🔇 開啟聲音":"🔊 關閉聲音"};})();
+(function(){var v=document.getElementById("bgv");if(!v)return;
+ function unlock(e){if(e&&e.target&&e.target.closest&&e.target.closest("#snd"))return;v.muted=false;var p=v.play();if(p&&p.catch)p.catch(function(){});
+  ["pointerdown","keydown","touchstart","scroll"].forEach(function(ev){window.removeEventListener(ev,unlock,true)})}
+ v.muted=false;var p=v.play();
+ if(p&&p.catch)p.catch(function(){v.muted=true;v.play().catch(function(){});
+  ["pointerdown","keydown","touchstart","scroll"].forEach(function(ev){window.addEventListener(ev,unlock,true)})});
+})();
+
+(function(){var v=document.getElementById("bgv"),b=document.getElementById("snd");if(!v||!b)return;
+ function sync(){b.textContent=v.muted?"🔇":"🔊";b.setAttribute("aria-pressed",v.muted?"false":"true")}
+ v.addEventListener("volumechange",sync);sync();
+ b.onclick=function(){v.muted=!v.muted;if(v.paused)v.play().catch(function(){});sync()};
+})();
 </script>
 </body>
 </html>
