@@ -30,9 +30,18 @@ pre{background:var(--code);border-radius:10px;padding:12px;margin:10px 0;white-s
 #ed{display:none;margin-bottom:16px}
 #ed input{margin-bottom:8px}
 #add,#ed,[data-a="edit"],[data-a="del"]{display:none!important}
+:root{--g1:#f6c9a8;--g2:#b9d8f0;--g3:#d7c4f0}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--g1:#5a2d14;--g2:#14304a;--g3:#33204d}}
+:root[data-theme="dark"]{--g1:#5a2d14;--g2:#14304a;--g3:#33204d}
+body::before{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;background:radial-gradient(circle at 20% 20%,var(--g1),transparent 45%),radial-gradient(circle at 80% 30%,var(--g2),transparent 45%),radial-gradient(circle at 50% 85%,var(--g3),transparent 50%);background-size:200% 200%;animation:flow 18s ease-in-out infinite alternate}
+@keyframes flow{0%{background-position:0% 0%}100%{background-position:100% 100%}}
+@media (prefers-reduced-motion:reduce){body::before{animation:none}}
+#bgv{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;z-index:-1;opacity:.6;pointer-events:none;filter:blur(2px)}
+@media (prefers-reduced-motion:reduce){#bgv{display:none}}
 </style>
 </head>
 <body>
+<video id="bgv" src="bg.mp4" autoplay muted loop playsinline disablepictureinpicture aria-hidden="true"></video>
 <main>
 <h1>📜 卡依腳本庫</h1>
 <div class="bar"><input id="q" placeholder="搜尋標題或內容…"><button class="p" id="add">＋新增</button></div>
