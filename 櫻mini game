@@ -1,6 +1,6 @@
 -- ====================================================================
 --  櫻 mini game AFK（獨立的第二個介面）
---  左邊分頁：自動撿花 / 自動翻機器人 / 每日小農場 / 悠閒釣魚 / 熔岩攀爬 / 21 點 / 設定
+--  左邊分頁：自動撿花 / 自動翻機器人 / 每日小農場 / 悠閒釣魚 / 熔岩攀爬 / 21 點 / 深淵地牢 / 設定
 --  移動方式：改用玩家螢幕上的搖桿移動（遊戲的移動由伺服器控制，直接叫角色走會被拉回原地）
 --  介面庫與主腳本共用同一個「卡依ui」，但會開成獨立的第二個視窗
 -- ====================================================================
@@ -106,8 +106,6 @@ local Move = {
     area = nil, pad = 2,     -- 撿花時用來把角色限制在區域內
     dist = 0,                -- 離目標的水平距離
     flySpeed = 30,           -- 飄行速度
-    safeSpeed = true,        -- 飄行速度不超過安全上限（防走路速度偵測）
-    safeCap = 15,            -- 安全上限（格/秒）；這個遊戲走路 16.7 沒事，50 會被踢
     hover = 4,               -- 飄行時離地高度
     bv = nil,                -- 飄行用的 BodyVelocity
     users = {},              -- 哪些功能正在用移動（撿花、翻機器人）
@@ -315,12 +313,6 @@ function Move.flyStep(d)
     end
     -- 垂直：維持在地面上方 hover 格；水平：朝目標移動，越靠近越慢
     local gy = groundYAt(root.Position)
-    -- 防走路速度偵測：水平、垂直速度都不超過走路速度（略低一點）
-    local cap = nil
-    if Move.safeSpeed then
-        local hum = getHumanoid()
-        cap = math.min(math.max((hum and hum.WalkSpeed or 16) * 0.9, 4), Move.safeCap)
-    end
     local vy = 0
     if gy then
         -- 地面高度做平滑，避免偵測到的地面忽高忽低，讓角色上下抖
@@ -328,12 +320,12 @@ function Move.flyStep(d)
         local err = (Move.gyF + Move.hover) - root.Position.Y
         -- 差不到 0.5 格就不修正（死區），不然停下來時會一直上下晃
         if math.abs(err) > 0.5 then
-            vy = math.clamp(err * 3, -(cap or 25), cap or 25)
+            vy = math.clamp(err * 3, -25, 25)
         end
     end
     local hv = Vector3.zero
     if d then
-        hv = d * math.min(Move.flySpeed, cap or math.huge, math.max(Move.dist, 1) * 6)
+        hv = d * math.min(Move.flySpeed, math.max(Move.dist, 1) * 6)
     end
     Move.bv.Velocity = Vector3.new(hv.X, vy, hv.Z)
 end
@@ -475,6 +467,7 @@ local FarmTab = Window:CreateTab("每日小農場")
 local FishTab = Window:CreateTab("悠閒釣魚")
 local LavaTab = Window:CreateTab("熔岩攀爬")
 local BjTab = Window:CreateTab("21 點")
+local DungeonTab = Window:CreateTab("深淵地牢")
 local SetTab = Window:CreateTab("設定")
 
 -- ========== 自動撿花（含移動方式）==========
@@ -517,32 +510,6 @@ local iFlySpeed = AfkTab:CreateInput({
 regNumber("flySpeed", iFlySpeed, function() return Move.flySpeed end, function(v)
     Move.flySpeed = v
 end)
-
-local iSafeCap = AfkTab:CreateInput({
-    Name = "安全速度上限（輸入數字）",
-    PlaceholderText = "預設 15，飄行速度最高只到這個數字",
-    Callback = function(text)
-        local n = tonumber(text)
-        if n and n >= 4 and n <= 100 then
-            Move.safeCap = n
-            notify("已設定", "安全速度上限 = " .. n)
-        else
-            notify("輸入錯誤", "請輸入 4~100 的數字")
-        end
-    end,
-})
-regNumber("safeCap", iSafeCap, function() return Move.safeCap end, function(v)
-    Move.safeCap = v
-end)
-
-local tSafeSpeed = AfkTab:CreateToggle({
-    Name = "飄行不超過走路速度（防走路速度偵測）",
-    CurrentValue = true,
-    Callback = function(v)
-        Move.safeSpeed = v
-    end,
-})
-regToggle("safeSpeed", tSafeSpeed, function() return Move.safeSpeed end)
 
 local iHover = AfkTab:CreateInput({
     Name = "飄行高度（離地幾格）",
@@ -3331,6 +3298,966 @@ do
 
     UI:OnClose(function()
         autoPlay, autoStart = false, false
+    end)
+end
+
+-- ====================================================================
+--  深淵地牢 自動闖關
+--  從探測紀錄看到的結構（DungeonDelveGui）：
+--   · 地圖是 11 欄 × 7 列的格子，每格是一個 TextLabel，文字是符號（🟢 史萊姆、💰 金幣、▦ 牆壁…）
+--   · 怪物的格子底色偏紅，格子裡的小數字是怪物血量
+--   · 角色是另一個 Frame，用位置換算成第幾格
+--   · 上下左右 ▲ ▼ ◀ ▶ 是按鈕，⏳ 是原地等待；走進怪物 = 攻擊
+--   · 升級會跳出三選一的卡片；死亡會跳出「🔁 再來一局」
+--  地圖、道具、怪物每次都是隨機的，所以腳本每一步都重新讀整張地圖、重新規劃路線。
+--  規則：
+--   · 怪物貼在旁邊 → 直接清掉；怪物剛好在兩格外 → 原地等它走過來
+--   · 地刺、陷阱、傳送一律不踩；道具盡量撿，樓梯最後才去
+--   · 祭壇 🎲、禮物 🎁：血量低於一半不碰，夠的話才撿（不一定撿，太遠就不撿）
+--   · 升級能力可選力量類或血量類（防禦、格擋兩邊都算）
+-- ====================================================================
+local DungeonTab = DungeonTab or Window:CreateTab("深淵地牢")
+DungeonTab:CreateSection("深淵地牢｜自動闖關")
+
+do
+    local GuiService = game:GetService("GuiService")
+    local VIM = game:GetService("VirtualInputManager")
+
+    local alive = true
+    local botOn = false
+    local mode = "collect"           -- collect = 先撿道具再下樓；dive = 直接下樓
+    local autoRestart = false
+    local maxRuns = 3
+    local runs = 0
+    local stepDelay = 0.4
+    local pref = "atk"               -- 升級能力偏好：atk = 力量類（攻擊）、hp = 血量類（生存、復活）
+    local holdCounts, stationary = {}, {}   -- 怪物在兩格外時原地等它：每隻最多等 3 次
+    local noPlan = 0                 -- 連續找不到安全路線的次數
+    local status = "--"
+    local logBuf = {}
+    local runStart = tick()
+    local blocked, failCount = {}, {}
+    local lastFloor = 0
+    local deadHandled = false
+    local againTries = 0
+    local cache = {}
+    local toggleBot
+
+    local function blog(s)
+        table.insert(logBuf, string.format("[%.1f] %s", tick() - runStart, s))
+        if #logBuf > 800 then table.remove(logBuf, 1) end
+    end
+    local function trim(s)
+        return (tostring(s):gsub("^%s+", ""):gsub("%s+$", ""))
+    end
+    local function strip(s)
+        return (tostring(s):gsub("<[^>]+>", ""):gsub("\u{FE0F}", ""))
+    end
+    local function shown(obj)
+        local cur = obj
+        while cur do
+            if cur:IsA("GuiObject") and not cur.Visible then return false end
+            if cur:IsA("ScreenGui") then return cur.Enabled end
+            cur = cur.Parent
+        end
+        return false
+    end
+
+    -- ===== 按按鈕 =====
+    local function press(btn)
+        if getconnections then
+            for _, sig in ipairs({btn.Activated, btn.MouseButton1Click}) do
+                local ok, conns = pcall(getconnections, sig)
+                if ok and conns and #conns > 0 then
+                    for _, c in ipairs(conns) do
+                        pcall(function() c:Fire() end)
+                    end
+                    return true
+                end
+            end
+        end
+        local g = btn:FindFirstAncestorWhichIsA("ScreenGui")
+        local inset = Vector2.new(0, 0)
+        if g and not g.IgnoreGuiInset then
+            inset = GuiService:GetGuiInset()
+        end
+        local p = btn.AbsolutePosition + btn.AbsoluteSize / 2 + inset
+        return pcall(function()
+            VIM:SendMouseButtonEvent(p.X, p.Y, 0, true, game, 0)
+            VIM:SendMouseButtonEvent(p.X, p.Y, 0, false, game, 0)
+        end)
+    end
+
+    local function getGui()
+        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+        return pg and pg:FindFirstChild("DungeonDelveGui")
+    end
+
+    -- ===== 掃描介面上的文字和按鈕 =====
+    local BTN_SYM = {up = "▲", down = "▼", left = "◀", right = "▶", wait = "⏳"}
+    local LOG_TOK = {"踏入深淵", "你攻擊", "攻擊你", "撿到", "進入第", "原地等待", "擊敗", "喝下", "吃下", "落雷"}
+
+    local function scan(gui)
+        local S = {btn = {}, cards = {}}
+        for _, v in ipairs(gui:GetDescendants()) do
+            if v:IsA("TextButton") then
+                if shown(v) then
+                    local t = trim(strip(v.Text))
+                    for k, sym in pairs(BTN_SYM) do
+                        if t == sym then
+                            S.btn[k] = v
+                        end
+                    end
+                    if t:find("再來一局", 1, true) then S.again = v end
+                    if t:find("繼續遊戲", 1, true) then S.cont = v end
+                end
+            elseif v:IsA("TextLabel") then
+                local t = strip(v.Text)
+                if t ~= "" and shown(v) then
+                    if t:find("升級！選擇", 1, true) then
+                        S.levelup = v
+                    elseif t:find("你倒下了", 1, true) then
+                        S.dead = v
+                    elseif t:find("確定要放棄", 1, true) then
+                        S.confirm = v
+                    end
+                    local cur, mx = t:match("❤%s*(%d+)%s*/%s*(%d+)")
+                    if cur and not S.hp then
+                        S.hp, S.maxhp, S.hpLabel = tonumber(cur), tonumber(mx), v
+                    end
+                    local atk = t:match("攻擊%s*(%d+)")
+                    if atk and not S.atk then
+                        S.atk = tonumber(atk)
+                    end
+                    local fl = t:match("^%S+%s*第%s*(%d+)%s*層")
+                    if fl and not S.floor then
+                        S.floor = tonumber(fl)
+                    end
+                    if not S.logLabel and v.AbsoluteSize.Y > 80 then
+                        for _, tk in ipairs(LOG_TOK) do
+                            if t:find(tk, 1, true) then
+                                S.logLabel = v
+                                break
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        -- 升級卡片：標題旁邊的三個按鈕，卡片裡的文字由上到下是 圖示、名稱、說明、標籤
+        if S.levelup then
+            for _, b in ipairs(S.levelup.Parent:GetChildren()) do
+                if b:IsA("TextButton") and shown(b) then
+                    local labs = {}
+                    for _, l in ipairs(b:GetChildren()) do
+                        if l:IsA("TextLabel") then
+                            table.insert(labs, l)
+                        end
+                    end
+                    table.sort(labs, function(a, c)
+                        return a.AbsolutePosition.Y < c.AbsolutePosition.Y
+                    end)
+                    local all = {}
+                    for _, l in ipairs(labs) do
+                        table.insert(all, strip(l.Text))
+                    end
+                    table.insert(S.cards, {btn = b, name = labs[2] and strip(labs[2].Text) or "", text = table.concat(all, " ")})
+                end
+            end
+        end
+        return S
+    end
+
+    -- 能力分類：
+    --   力量類 = 攻擊、暴擊這類
+    --   血量類 = 生命、回復、吸血、復活、閃避這類（會動到血量的）
+    --   防禦類（防禦、格擋、護盾）像血量又像攻擊，兩邊都算
+    local ATK_NAME = {"蠻力", "力量", "致命", "狂戰", "暴擊", "利刃", "鋒"}
+    local HP_NAME = {"生命", "活力", "治癒", "治療", "回復", "吸血", "復活", "重生", "再生", "閃避", "堅韌", "體質"}
+    local BOTH_NAME = {"格擋", "防禦", "護盾", "盾", "鎧", "甲"}
+    local DEF_WORD = {"防禦", "減傷", "受到的傷害", "擋下", "免疫"}
+    local HP_WORD = {"最大生命", "回復", "復活", "重生", "吸血", "治療", "再生", "生命"}
+    local ATK_WORD = {"攻擊", "暴擊", "傷害"}
+    local TIE = {
+        atk = {"蠻力", "致命", "狂戰", "格擋"},
+        hp = {"復活", "重生", "生命", "格擋", "閃避"},
+    }
+
+    local function hasAny(str, list)
+        for _, w in ipairs(list) do
+            if str:find(w, 1, true) then
+                return true
+            end
+        end
+        return false
+    end
+
+    local function abilityKinds(name, text)
+        local k = {atk = false, hp = false}
+        if hasAny(name, BOTH_NAME) then
+            k.atk, k.hp = true, true
+            return k
+        end
+        if hasAny(name, ATK_NAME) then k.atk = true end
+        if hasAny(name, HP_NAME) then k.hp = true end
+        if k.atk or k.hp then
+            return k
+        end
+        -- 名稱認不出來，改看說明文字
+        if hasAny(text, DEF_WORD) then
+            k.atk, k.hp = true, true
+            return k
+        end
+        if hasAny(text, HP_WORD) then k.hp = true end
+        if hasAny(text, ATK_WORD) then k.atk = true end
+        return k
+    end
+
+    local function chooseCard(cards)
+        local other = pref == "atk" and "hp" or "atk"
+        local pool, pool2 = {}, {}
+        for _, cd in ipairs(cards) do
+            cd.kinds = abilityKinds(cd.name, cd.text)
+            if cd.kinds[pref] then
+                table.insert(pool, cd)
+            elseif cd.kinds[other] then
+                table.insert(pool2, cd)
+            end
+        end
+        local list = #pool > 0 and pool or (#pool2 > 0 and pool2 or cards)
+        local best, bi = list[1], math.huge
+        for _, cd in ipairs(list) do
+            for i, w in ipairs(TIE[pref]) do
+                if cd.name:find(w, 1, true) and i < bi then
+                    best, bi = cd, i
+                end
+            end
+        end
+        return best, #pool
+    end
+
+    -- ===== 讀地圖 =====
+    local ITEM_TOK = {
+        {"🍎", "apple"}, {"🧪", "potion"}, {"💰", "gold"}, {"💎", "gem"}, {"⚔", "sword"}, {"🛡", "shield"},
+        {"📦", "chest"}, {"🎲", "altar"}, {"🎁", "curse"}, {"🔑", "key"}, {"▼", "stairs"},
+    }
+    local BAD_TOK = {
+        {"🔺", "spike"}, {"🔥", "trap"}, {"🍄", "trap"}, {"🌀", "tele"}, {"🏪", "shop"},
+        {"🔒", "lock"}, {"⚡", "bolt"},
+    }
+    local DIRS = {{-1, 0, "up"}, {1, 0, "down"}, {0, -1, "left"}, {0, 1, "right"}}
+
+    local function classify(lbl)
+        local text = strip(lbl.Text)
+        local bg = lbl.BackgroundColor3
+        local R, G, B = bg.R * 255, bg.G * 255, bg.B * 255
+        local cell = {text = text, kind = "floor", hp = 0}
+        -- 黃色底 = 落雷預警
+        if R > 100 and G > 85 and B < 50 then
+            cell.danger = true
+        end
+        if text == "" then
+            return cell
+        end
+        if text:find("▦", 1, true) then
+            cell.kind = "wall"
+            return cell
+        end
+        -- 怪物的格子裡有一個小數字（血量）
+        local child = lbl:FindFirstChildWhichIsA("TextLabel")
+        local hp = child and tonumber(strip(child.Text):match("^%d+$") or "")
+        if hp then
+            cell.kind = "enemy"
+            cell.hp = hp
+            return cell
+        end
+        for _, p in ipairs(BAD_TOK) do
+            if text:find(p[1], 1, true) then
+                if p[2] == "bolt" then
+                    cell.danger = true
+                else
+                    cell.kind = p[2]
+                end
+                return cell
+            end
+        end
+        for _, p in ipairs(ITEM_TOK) do
+            if text:find(p[1], 1, true) then
+                cell.kind = p[2]
+                return cell
+            end
+        end
+        cell.kind = "unknown"
+        return cell
+    end
+
+    local function clusters(vals)
+        table.sort(vals)
+        local out = {}
+        for _, v in ipairs(vals) do
+            if #out == 0 or v - out[#out] > 6 then
+                table.insert(out, v)
+            end
+        end
+        return out
+    end
+    local function idxOf(list, v)
+        local best, bd = 1, math.huge
+        for i, x in ipairs(list) do
+            local d = math.abs(x - v)
+            if d < bd then
+                best, bd = i, d
+            end
+        end
+        return best
+    end
+
+    -- 找放格子的那個 Frame（底下有幾十個正方形 TextLabel）
+    local function findMap(gui)
+        if cache.map and cache.map.Parent then
+            return cache.map
+        end
+        for _, f in ipairs(gui:GetDescendants()) do
+            if f:IsA("Frame") then
+                local n = 0
+                for _, c in ipairs(f:GetChildren()) do
+                    if c:IsA("TextLabel") then
+                        local s = c.AbsoluteSize
+                        if math.abs(s.X - s.Y) < 3 and s.X > 20 then
+                            n += 1
+                        end
+                    end
+                end
+                if n >= 40 then
+                    cache.map = f
+                    return f
+                end
+            end
+        end
+        return nil
+    end
+
+    local function readState(gui)
+        local map = findMap(gui)
+        if not map then
+            return nil
+        end
+        local labels, xs, ys = {}, {}, {}
+        local cellW = 0
+        for _, c in ipairs(map:GetChildren()) do
+            if c:IsA("TextLabel") then
+                local s = c.AbsoluteSize
+                if math.abs(s.X - s.Y) < 3 and s.X > 20 then
+                    table.insert(labels, c)
+                    table.insert(xs, c.AbsolutePosition.X)
+                    table.insert(ys, c.AbsolutePosition.Y)
+                    cellW = s.X
+                end
+            end
+        end
+        if #labels < 20 then
+            return nil
+        end
+        local cx, cy = clusters(xs), clusters(ys)
+        local G = {grid = {}, rows = #cy, cols = #cx}
+        for r = 1, #cy do
+            G.grid[r] = {}
+        end
+        local blue
+        for _, lbl in ipairs(labels) do
+            local r = idxOf(cy, lbl.AbsolutePosition.Y)
+            local c = idxOf(cx, lbl.AbsolutePosition.X)
+            local cell = classify(lbl)
+            cell.cx = lbl.AbsolutePosition.X + lbl.AbsoluteSize.X / 2
+            cell.cy = lbl.AbsolutePosition.Y + lbl.AbsoluteSize.Y / 2
+            local bg = lbl.BackgroundColor3
+            if math.abs(bg.R * 255 - 34) < 6 and math.abs(bg.G * 255 - 56) < 6 and math.abs(bg.B * 255 - 90) < 6 then
+                blue = {r, c}
+            end
+            G.grid[r][c] = cell
+        end
+        -- 角色：另一個比格子小一點的 Frame，用中心點找最近的格子
+        for _, c in ipairs(map:GetChildren()) do
+            if c:IsA("Frame") and c.AbsoluteSize.X > 20 and c.AbsoluteSize.X < cellW - 2 then
+                G.pf = c
+                break
+            end
+        end
+        if G.pf then
+            local px = G.pf.AbsolutePosition.X + G.pf.AbsoluteSize.X / 2
+            local py = G.pf.AbsolutePosition.Y + G.pf.AbsoluteSize.Y / 2
+            local bd = math.huge
+            for r = 1, G.rows do
+                for c = 1, G.cols do
+                    local cell = G.grid[r][c]
+                    if cell then
+                        local d = (cell.cx - px) ^ 2 + (cell.cy - py) ^ 2
+                        if d < bd then
+                            bd = d
+                            G.pr, G.pc = r, c
+                        end
+                    end
+                end
+            end
+        end
+        if not G.pr and blue then
+            G.pr, G.pc = blue[1], blue[2]
+        end
+        if not G.pr then
+            return nil
+        end
+        -- 角色腳下那格當作空地（保留落雷預警）
+        local under = G.grid[G.pr][G.pc]
+        G.grid[G.pr][G.pc] = {text = "", kind = "floor", hp = 0, danger = under.danger, cx = under.cx, cy = under.cy}
+        return G
+    end
+
+    -- ===== 規劃 =====
+    local ITEMKIND = {apple = true, potion = true, gold = true, gem = true, sword = true, shield = true,
+        chest = true, altar = true, curse = true, key = true, stairs = true}
+    local OPTIONAL = {altar = true, curse = true}     -- 祭壇、禮物：不一定要撿，血量夠、而且很近才去
+
+    local function countAdjE(G, r, c)
+        local n = 0
+        for _, d in ipairs(DIRS) do
+            local row = G.grid[r + d[1]]
+            local g = row and row[c + d[2]]
+            if g and g.kind == "enemy" then
+                n += 1
+            end
+        end
+        return n
+    end
+
+    local function planPath(G, S)
+        local grid, R, C = G.grid, G.rows, G.cols
+        local pr, pc = G.pr, G.pc
+        local atk = math.max(S.atk or 2, 1)
+        local hp, maxhp = S.hp or 1, S.maxhp or 1
+        local halfOk = hp * 2 >= maxhp      -- 血量有沒有到一半（祭壇、禮物要看這個）
+
+        local function enter(r, c)
+            if blocked[r .. "," .. c] then return nil end
+            local g = grid[r] and grid[r][c]
+            if not g then return nil end
+            local k = g.kind
+            -- 牆、地刺、陷阱、傳送、商人、鎖箱：一律不走
+            if k == "wall" or k == "unknown" or k == "shop" or k == "lock"
+                or k == "spike" or k == "trap" or k == "tele" then
+                return nil
+            end
+            local cost = 1
+            if k == "enemy" then
+                cost = 1 + math.ceil(g.hp / atk) * 1.5
+            elseif k == "altar" or k == "curse" then
+                -- 血量低於一半就不碰；夠的話可以走，但沒要撿就盡量別踩到
+                if not halfOk then return nil end
+                cost = 8
+            end
+            if g.danger then cost += 20 end
+            cost += countAdjE(G, r, c) * 1.2
+            return cost
+        end
+
+        local function key(r, c)
+            return (r - 1) * C + c
+        end
+        local startK = key(pr, pc)
+        local dist, prev, done = {[startK] = 0}, {}, {}
+        while true do
+            local bu, bd
+            for k, d in pairs(dist) do
+                if not done[k] and (not bd or d < bd) then
+                    bu, bd = k, d
+                end
+            end
+            if not bu then break end
+            done[bu] = true
+            local r = math.floor((bu - 1) / C) + 1
+            local c = (bu - 1) % C + 1
+            for _, d in ipairs(DIRS) do
+                local rr, cc = r + d[1], c + d[2]
+                if rr >= 1 and rr <= R and cc >= 1 and cc <= C then
+                    local w = enter(rr, cc)
+                    if w then
+                        local k2 = key(rr, cc)
+                        local nd = bd + w
+                        if not dist[k2] or nd < dist[k2] then
+                            dist[k2] = nd
+                            prev[k2] = bu
+                        end
+                    end
+                end
+            end
+        end
+
+        -- 每種東西值多少分（藥水只有在缺血時才撿）
+        local missing = maxhp - hp
+        local V = {
+            apple = 14, gold = 6, gem = 10, sword = 16, shield = 16, chest = 9, key = 4, altar = 6, curse = 4,
+            potion = missing >= 1 and (hp <= maxhp * 0.5 and 30 or (missing >= 3 and 14 or 6)) or nil,
+        }
+
+        local cand, stairs = {}, nil
+        for r = 1, R do
+            for c = 1, C do
+                local g = grid[r][c]
+                local d = g and dist[key(r, c)]
+                if g and d and (r ~= pr or c ~= pc) then
+                    if g.kind == "stairs" then
+                        if not stairs or d < stairs.dist then
+                            stairs = {r = r, c = c, kind = "stairs", dist = d, score = 0}
+                        end
+                    elseif ITEMKIND[g.kind] and V[g.kind] and not (OPTIONAL[g.kind] and d > 8) then
+                        table.insert(cand, {r = r, c = c, kind = g.kind, dist = d, score = V[g.kind] - d * 0.3})
+                    end
+                end
+            end
+        end
+        local topItem
+        for _, t in ipairs(cand) do
+            if not topItem or t.score > topItem.score then
+                topItem = t
+            end
+        end
+        local best
+        if mode == "dive" then
+            best = stairs or topItem
+        else
+            best = topItem or stairs      -- 收集：道具撿完才去樓梯
+        end
+        if not best then
+            return nil
+        end
+
+        local cur = key(best.r, best.c)
+        local guard = 0
+        while prev[cur] and prev[cur] ~= startK and guard < 200 do
+            cur = prev[cur]
+            guard += 1
+        end
+        if not prev[cur] then
+            return nil
+        end
+        local rr = math.floor((cur - 1) / C) + 1
+        local cc = (cur - 1) % C + 1
+        local dir
+        if rr < pr then
+            dir = "up"
+        elseif rr > pr then
+            dir = "down"
+        elseif cc < pc then
+            dir = "left"
+        else
+            dir = "right"
+        end
+        return {dir = dir, r = rr, c = cc, target = best,
+            why = string.format("前往 %s (%d,%d) 距離 %.1f", best.kind, best.r, best.c, best.dist)}
+    end
+
+    -- 找距離剛好兩格（上下左右各算一格）的怪物
+    local function findNear2(G)
+        for r = 1, G.rows do
+            for c = 1, G.cols do
+                local g = G.grid[r][c]
+                if g and g.kind == "enemy" and math.abs(r - G.pr) + math.abs(c - G.pc) == 2 then
+                    local k = r .. "," .. c
+                    if not stationary[k] then
+                        return k
+                    end
+                end
+            end
+        end
+        return nil
+    end
+
+    -- commit = true 才會更新「等怪物」的計數（預覽時不會）
+    local function decide(G, S, commit)
+        local pr, pc = G.pr, G.pc
+        local here = G.grid[pr][pc]
+        local plan = planPath(G, S)
+
+        -- 1. 站在落雷預警上，先離開
+        if here.danger then
+            local bestN, bestS
+            for _, d in ipairs(DIRS) do
+                local rr, cc = pr + d[1], pc + d[2]
+                local row = G.grid[rr]
+                local g = row and row[cc]
+                if g and not g.danger and not blocked[rr .. "," .. cc]
+                    and (g.kind == "floor" or ITEMKIND[g.kind]) then
+                    local sc = countAdjE(G, rr, cc) * 2
+                    if plan then
+                        sc += (math.abs(rr - plan.target.r) + math.abs(cc - plan.target.c)) * 0.1
+                    end
+                    if not bestS or sc < bestS then
+                        bestN, bestS = {dir = d[3], r = rr, c = cc, why = "離開落雷預警"}, sc
+                    end
+                end
+            end
+            if bestN then
+                return bestN
+            end
+        end
+
+        -- 2. 怪物已經貼在旁邊：直接清掉（先打血量最少的）
+        local weakest
+        for _, d in ipairs(DIRS) do
+            local rr, cc = pr + d[1], pc + d[2]
+            local row = G.grid[rr]
+            local g = row and row[cc]
+            if g and g.kind == "enemy" and (not weakest or g.hp < weakest.hp) then
+                weakest = {dir = d[3], r = rr, c = cc, hp = g.hp}
+            end
+        end
+        if weakest then
+            weakest.why = "清掉旁邊的怪物 hp=" .. weakest.hp
+            return weakest
+        end
+
+        -- 3. 怪物剛好在兩格外：待在原地，等它自己走過來再打
+        local near2 = findNear2(G)
+        if near2 then
+            local n = (holdCounts[near2] or 0) + 1
+            if commit then
+                holdCounts[near2] = n
+            end
+            if n <= 3 then
+                return {dir = "wait", why = "怪物在兩格外，原地等它過來（" .. n .. "/3）"}
+            end
+            if commit then
+                stationary[near2] = true
+                blog("怪物 (" .. near2 .. ") 好像不會靠過來，不再等它")
+            end
+        end
+
+        if plan then
+            return plan
+        end
+        return {dir = "wait", why = "沒有安全的路線，原地等待", noPlan = true}
+    end
+
+    -- ===== 偵錯：把地圖印成文字 =====
+    local function dumpGrid(G, S)
+        local SYM = {floor = ".", wall = "#", enemy = "E", apple = "a", potion = "p", gold = "g", gem = "G",
+            sword = "s", shield = "d", chest = "c", altar = "A", key = "k", stairs = ">", spike = "^",
+            trap = "x", tele = "@", shop = "$", lock = "L", curse = "!", unknown = "?"}
+        blog(string.format("---- 地圖 %d 列 × %d 欄｜血量 %s/%s 攻擊 %s 第 %s 層｜P=角色 *=落雷預警 ----",
+            G.rows, G.cols, tostring(S.hp), tostring(S.maxhp), tostring(S.atk), tostring(S.floor)))
+        local enemies = {}
+        for r = 1, G.rows do
+            local line = {}
+            for c = 1, G.cols do
+                local g = G.grid[r][c]
+                local ch = "?"
+                if r == G.pr and c == G.pc then
+                    ch = "P"
+                elseif g then
+                    ch = SYM[g.kind] or "?"
+                    if g.danger and g.kind == "floor" then ch = "*" end
+                    if g.kind == "enemy" then
+                        table.insert(enemies, string.format("(%d,%d)%s hp=%d", r, c, g.text, g.hp))
+                    end
+                end
+                table.insert(line, ch)
+            end
+            blog(table.concat(line, " "))
+        end
+        if #enemies > 0 then
+            blog("怪物：" .. table.concat(enemies, "　"))
+        end
+    end
+
+    local function sigOf(S, G)
+        local p = G.pf and (G.pf.AbsolutePosition.X .. "," .. G.pf.AbsolutePosition.Y) or ""
+        return (S.hpLabel and S.hpLabel.Text or "") .. "|" .. (S.logLabel and S.logLabel.Text or "") .. "|" .. p
+    end
+
+    local function stopBot(msg)
+        botOn = false
+        status = msg
+        blog("停止：" .. msg)
+        notify("深淵地牢", msg, 5)
+        if toggleBot then
+            pcall(function() toggleBot:Set(false) end)
+        end
+    end
+
+    -- ===== 主流程：一次一步 =====
+    local function tickBot()
+        local gui = getGui()
+        if not gui then
+            status = "找不到 DungeonDelveGui"
+            return
+        end
+        local S = scan(gui)
+
+        if S.dead then
+            if not deadHandled then
+                deadHandled = true
+                runs += 1
+                local sum = ""
+                for _, l in ipairs(S.dead.Parent:GetChildren()) do
+                    if l:IsA("TextLabel") and l ~= S.dead then
+                        sum = sum .. " " .. strip(l.Text):gsub("%s+", " ")
+                    end
+                end
+                blog("倒下了（第 " .. runs .. " 局）：" .. sum)
+            end
+            if autoRestart and runs < maxRuns then
+                againTries += 1
+                if S.again and againTries <= 5 then
+                    blog("按「再來一局」")
+                    task.wait(1)
+                    press(S.again)
+                    task.wait(1.5)
+                end
+            elseif autoRestart then
+                stopBot("已打完 " .. runs .. " 局")
+            else
+                stopBot("倒下了，已停止（沒開「死後自動再來一局」）")
+            end
+            return
+        end
+        deadHandled = false
+        againTries = 0
+
+        if S.confirm and S.cont then
+            blog("放棄視窗被打開了，按「繼續遊戲」")
+            press(S.cont)
+            task.wait(0.6)
+            return
+        end
+
+        if S.levelup and #S.cards > 0 then
+            local cd, fit = chooseCard(S.cards)
+            blog("升級：選 " .. cd.name .. "（偏好" .. (pref == "atk" and "力量類" or "血量類")
+                .. "，符合的有 " .. fit .. " 張 / 共 " .. #S.cards .. " 張）")
+            task.wait(0.5)
+            press(cd.btn)
+            task.wait(0.9)
+            return
+        end
+
+        if not S.hp then
+            status = "讀不到血量（還沒進遊戲？）"
+            return
+        end
+        local G = readState(gui)
+        if not G then
+            status = "讀不到地圖"
+            return
+        end
+        if S.floor and S.floor ~= lastFloor then
+            lastFloor = S.floor
+            blocked, failCount = {}, {}
+            holdCounts, stationary = {}, {}
+            noPlan = 0
+            blog("進入第 " .. S.floor .. " 層")
+        end
+
+        local act = decide(G, S, true)
+        if act.noPlan then
+            noPlan += 1
+            if noPlan >= 8 then
+                stopBot("沒有安全的路線（可能被地刺、陷阱或牆擋住了），已停止")
+                return
+            end
+        else
+            noPlan = 0
+        end
+        local btn = S.btn[act.dir]
+        if not btn then
+            status = "找不到按鈕 " .. tostring(act.dir)
+            return
+        end
+        status = string.format("第 %s 層 ❤%d/%d 位置(%d,%d) → %s", tostring(S.floor), S.hp, S.maxhp, G.pr, G.pc, act.why)
+        blog(string.format("(%d,%d) ❤%d/%d %s：%s", G.pr, G.pc, S.hp, S.maxhp, act.dir, act.why))
+
+        local before = sigOf(S, G)
+        press(btn)
+        local changed = false
+        local t0 = tick()
+        while tick() - t0 < 1.6 do
+            task.wait(0.06)
+            if sigOf(S, G) ~= before then
+                changed = true
+                break
+            end
+        end
+        if act.r then
+            local k = act.r .. "," .. act.c
+            if changed then
+                failCount[k] = nil
+            else
+                failCount[k] = (failCount[k] or 0) + 1
+                if failCount[k] >= 2 then
+                    blocked[k] = true
+                    blog("這一格走不進去，先當成障礙：(" .. k .. ")")
+                end
+            end
+        end
+        task.wait(stepDelay)
+    end
+
+    task.spawn(function()
+        while alive do
+            if botOn then
+                local ok, err = pcall(tickBot)
+                if not ok then
+                    status = "錯誤：" .. tostring(err)
+                    blog("錯誤：" .. tostring(err))
+                    task.wait(1)
+                end
+            end
+            task.wait(0.15)
+        end
+    end)
+
+    -- ===== 介面 =====
+    toggleBot = DungeonTab:CreateToggle({
+        Name = "自動闖關",
+        CurrentValue = false,
+        Callback = function(v)
+            botOn = v
+            if v then
+                runs = 0
+                runStart = tick()
+                blocked, failCount = {}, {}
+                holdCounts, stationary = {}, {}
+                noPlan = 0
+                lastFloor = 0
+                blog("---- 開始自動闖關 ----")
+            end
+        end,
+    })
+
+    local MODES = {"收集（先撿道具再下樓）", "推進（直接下樓）"}
+    DungeonTab:CreateDropdown({
+        Name = "策略",
+        Options = MODES,
+        CurrentOption = {MODES[1]},
+        Callback = function(opt)
+            local s = type(opt) == "table" and opt[1] or opt
+            mode = tostring(s):find("推進", 1, true) and "dive" or "collect"
+        end,
+    })
+
+    DungeonTab:CreateToggle({
+        Name = "死後自動再來一局",
+        CurrentValue = false,
+        Callback = function(v)
+            autoRestart = v
+        end,
+    })
+
+    DungeonTab:CreateInput({
+        Name = "最多連續玩幾局（預設 3）",
+        PlaceholderText = "例如 3",
+        Callback = function(text)
+            local n = tonumber(text)
+            if n and n >= 1 then
+                maxRuns = math.floor(n)
+                notify("已設定", "最多 " .. maxRuns .. " 局")
+            else
+                notify("輸入錯誤", "請輸入 1 以上的整數")
+            end
+        end,
+    })
+
+    DungeonTab:CreateInput({
+        Name = "每一步的間隔（秒，預設 0.4）",
+        PlaceholderText = "太快可能被遊戲忽略",
+        Callback = function(text)
+            local n = tonumber(text)
+            if n and n >= 0.1 and n <= 3 then
+                stepDelay = n
+                notify("已設定", "間隔 " .. n .. " 秒")
+            else
+                notify("輸入錯誤", "請輸入 0.1~3 的數字")
+            end
+        end,
+    })
+
+    local PREFS = {"力量類（攻擊）", "血量類（生存、復活）"}
+    DungeonTab:CreateDropdown({
+        Name = "升級能力偏好（防禦、格擋兩邊都算）",
+        Options = PREFS,
+        CurrentOption = {PREFS[1]},
+        Callback = function(opt)
+            local s2 = type(opt) == "table" and opt[1] or opt
+            pref = tostring(s2):find("血量", 1, true) and "hp" or "atk"
+        end,
+    })
+
+    DungeonTab:CreateSection("偵錯（先用這兩個確認判讀正確再開自動）")
+
+    DungeonTab:CreateButton({
+        Name = "判讀目前地圖（印成文字）",
+        Callback = function()
+            local gui = getGui()
+            local S = gui and scan(gui)
+            local G = gui and readState(gui)
+            if S and G then
+                dumpGrid(G, S)
+                notify("深淵地牢", "地圖已記入紀錄，按「複製全部紀錄」貼給我", 4)
+            else
+                notify("深淵地牢", "讀不到地圖，請先進入遊戲", 4)
+            end
+        end,
+    })
+
+    DungeonTab:CreateButton({
+        Name = "預覽下一步（不會動作）",
+        Callback = function()
+            local gui = getGui()
+            local S = gui and scan(gui)
+            local G = gui and S and S.hp and readState(gui)
+            if S and G then
+                local act = decide(G, S, false)
+                blog(string.format("預覽：(%d,%d) ❤%d/%d → %s：%s", G.pr, G.pc, S.hp, S.maxhp, act.dir, act.why))
+                notify("預覽下一步", act.dir .. "：" .. act.why, 5)
+            else
+                notify("深淵地牢", "讀不到地圖，請先進入遊戲", 4)
+            end
+        end,
+    })
+
+    DungeonTab:CreateButton({
+        Name = "複製全部紀錄",
+        Callback = function()
+            local text = table.concat(logBuf, "\n")
+            if setclipboard then pcall(setclipboard, text) end
+            if writefile then pcall(writefile, "KaiDungeonBot.txt", text) end
+            notify("深淵地牢", "已複製 " .. #logBuf .. " 行紀錄", 4)
+        end,
+    })
+
+    DungeonTab:CreateButton({
+        Name = "清除紀錄",
+        Callback = function()
+            logBuf = {}
+            runStart = tick()
+            notify("深淵地牢", "紀錄已清除", 2)
+        end,
+    })
+
+    local statusBtn = DungeonTab:CreateButton({
+        Name = "狀態  --",
+        Callback = function()
+            notify("深淵地牢", status, 5)
+        end,
+    })
+    task.spawn(function()
+        while alive do
+            statusBtn:SetName("狀態  " .. status)
+            task.wait(0.5)
+        end
+    end)
+
+    UI:OnClose(function()
+        alive = false
+        botOn = false
     end)
 end
 
