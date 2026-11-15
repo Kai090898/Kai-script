@@ -71,8 +71,13 @@ end
 
 -- Remote：先找 Events 資料夾，再找 ReplicatedStorage 根目錄
 local Events = RS:WaitForChild("Events", 10)
+local rcache = {}
 local function getRemote(name)
-    return (Events and Events:FindFirstChild(name)) or RS:FindFirstChild(name)
+    local r = rcache[name]
+    if r and r.Parent then return r end
+    r = (Events and Events:FindFirstChild(name)) or RS:FindFirstChild(name)
+    rcache[name] = r
+    return r
 end
 local function fire(name, ...)
     local r = getRemote(name)
@@ -177,8 +182,8 @@ local S = {}        -- 各功能的開關（只在這個執行期間有效）
 local N = {         -- 數值設定
     clickSpeed = 1.2,
     giftCount = 12,
-    hatchDelay = 1.2,
-    cleanAge = 3,
+    hatchDelay = 0.3,
+    cleanAge = 2,
     shopDelay = 5,
     mergeAmount = 5,
     mergeDelay = 0.6,
@@ -186,13 +191,13 @@ local N = {         -- 數值設定
     tpX = 0,
     tpY = 12.4,
     tpZ = 0,
-    fightSpeed = 3,
+    fightSpeed = 10,
     exitHp = 0,
 }
 local T = {         -- 文字 / 選項設定
     egg = "",
     eggCustom = "",
-    hatchMode = "自動",
+    hatchMode = "事件",
     petName = "",
     mergeTier = "Golden",
     teleport = "1",
@@ -214,7 +219,7 @@ local function every(name, getDelay, fn)
                     blog(name .. " 錯誤：" .. tostring(err))
                     task.wait(1)
                 end
-                task.wait(math.max(getDelay(), 0.1))
+                task.wait(math.max(getDelay(), 0.03))
             else
                 task.wait(0.3)
             end
@@ -479,9 +484,9 @@ do
     })
     regText("eggCustom", iCustom, function() return T.eggCustom end, function(v) T.eggCustom = v end)
 
-    local MODES = {"自動", "Open3", "事件"}
+    local MODES = {"事件", "自動", "Open3"}
     local dMode = EggTab:CreateDropdown({
-        Name = "孵蛋方式（自動 = 有 Open 按鈕就按，沒有就送事件）",
+        Name = "孵蛋方式（事件 = 一直送，不管動畫播到哪；自動 = 有 Open 按鈕就按）",
         Options = MODES,
         CurrentOption = {T.hatchMode},
         Callback = function(opt)
@@ -491,7 +496,7 @@ do
     regDropdown("hatchMode", dMode, function() return T.hatchMode end, function(v) T.hatchMode = v end)
 
     addToggle(EggTab, "自動孵蛋（要站在蛋旁邊）", "hatch")
-    addNumber(EggTab, "孵蛋間隔（秒）", "預設 1.2", "hatchDelay", 0.3)
+    addNumber(EggTab, "孵蛋間隔（秒）", "預設 0.3，事件方式可以調到 0.05", "hatchDelay", 0.05)
     addToggle(EggTab, "孵蛋前先傳送到蛋旁邊", "eggTeleport")
 
     EggTab:CreateButton({
@@ -535,15 +540,16 @@ do
         end
         hatchCount += 1
         status = string.format("已孵蛋 %d 次（%s，%s）", hatchCount, egg, used and "按鈕" or "事件")
-        if S.instantOpen then
-            task.wait(0.15)
-            for _, n in ipairs({"PetOpenUI", "PetOpenUIOLD"}) do
-                local g = dig(getPg(), n)
-                if g then g.Enabled = false end
-            end
-        end
     end
     every("hatch", function() return N.hatchDelay end, hatchOnce)
+
+    -- 瞬間開蛋：不管動畫播到哪，一直把開蛋畫面關掉（跟孵蛋分開跑，不會拖慢孵蛋速度）
+    every("instantOpen", function() return 0.1 end, function()
+        for _, n in ipairs({"PetOpenUI", "PetOpenUIOLD"}) do
+            local g = dig(getPg(), n)
+            if g and g.Enabled then g.Enabled = false end
+        end
+    end)
 end
 
 EggTab:CreateSection("開蛋動畫（避免越開越卡）")
@@ -593,9 +599,9 @@ do
     end
 
     addToggle(EggTab, "清除開蛋動畫殘留", "cleanHatch")
-    addNumber(EggTab, "動畫保留幾秒後清除", "預設 3，越小越乾淨，但太小會把正在播的動畫弄壞", "cleanAge", 0.5)
+    addNumber(EggTab, "動畫保留幾秒後清除", "預設 2，連續孵蛋時可以調到 1", "cleanAge", 0.5)
     addToggle(EggTab, "瞬間開蛋（開完立刻關掉開蛋畫面）", "instantOpen")
-    every("cleanHatch", function() return 1 end, function()
+    every("cleanHatch", function() return 0.5 end, function()
         clean(N.cleanAge)
     end)
 
@@ -863,69 +869,159 @@ do
         end,
     })
 
-    -- 副本自動刷：找最近的敵人 → 傳到它旁邊 → 一直攻擊到它死掉
-    addToggle(DungeonTab, "副本自動刷（傳到敵人旁邊攻擊）", "dungeonFarm")
+    -- 副本自動刷：每一幀都把角色鎖在敵人頭上（不會掉下來被打），打死一隻立刻換下一隻
+    local farm = {target = nil, acc = 0, hover = nil, startT = 0, noEnemySince = nil}
+    local kills, runs, lastKill, totalKill = 0, 0, 0, 0
+    local ignoreUntil = setmetatable({}, {__mode = "k"})
+
+    addToggle(DungeonTab, "副本自動刷（待在敵人頭上攻擊）", "dungeonFarm", function(v)
+        if v then
+            kills, runs, lastKill, totalKill = 0, 0, 0, 0
+        end
+    end)
     addToggle(DungeonTab, "副本完成後自動重新開始", "dungeonRestart")
-    addNumber(DungeonTab, "攻擊速度（每秒幾次）", "預設 3", "fightSpeed", 0.5)
-    addNumber(DungeonTab, "傳送偏移 X", "預設 0（相對敵人的方向）", "tpX", -500)
-    addNumber(DungeonTab, "傳送偏移 Y", "預設 12.4（在敵人上方）", "tpY", -500)
+
+    local PRIORITIES = {"最近", "先打王（血最多）", "先打血最少"}
+    T.dungeonPriority = "最近"
+    local dPri = DungeonTab:CreateDropdown({
+        Name = "目標優先順序",
+        Options = PRIORITIES,
+        CurrentOption = {T.dungeonPriority},
+        Callback = function(opt)
+            T.dungeonPriority = type(opt) == "table" and opt[1] or opt
+        end,
+    })
+    regDropdown("dungeonPriority", dPri, function() return T.dungeonPriority end, function(v)
+        T.dungeonPriority = v
+    end)
+
+    addNumber(DungeonTab, "攻擊速度（每秒幾次，上限 60）", "預設 10；伺服器有冷卻的話再快也沒用", "fightSpeed", 0.5)
+    addNumber(DungeonTab, "傳送偏移 X", "預設 0", "tpX", -500)
+    addNumber(DungeonTab, "傳送偏移 Y", "預設 12.4（在敵人頭上）", "tpY", -500)
     addNumber(DungeonTab, "傳送偏移 Z", "預設 0", "tpZ", -500)
     addNumber(DungeonTab, "血量低於幾 % 就退出副本（0 = 不啟用）", "預設 0", "exitHp", 0)
 
-    every("dungeonFarm", function() return 0.2 end, function()
-        local root, hum = getRoot(), getHumanoid()
+    local function pickTarget(root)
+        local best, bestScore
+        for _, e in ipairs(aliveEnemies()) do
+            if (ignoreUntil[e] or 0) < tick() then
+                local cf = cframeOf(e)
+                if cf then
+                    local hum = e:FindFirstChildOfClass("Humanoid")
+                    local score
+                    if T.dungeonPriority == "先打王（血最多）" and hum then
+                        score = -hum.MaxHealth
+                    elseif T.dungeonPriority == "先打血最少" and hum then
+                        score = hum.Health
+                    else
+                        score = (cf.Position - root.Position).Magnitude
+                    end
+                    if not bestScore or score < bestScore then
+                        best, bestScore = e, score
+                    end
+                end
+            end
+        end
+        return best
+    end
+
+    -- 每一幀執行：換目標、鎖在目標頭上、依速度送出攻擊
+    RunService.Heartbeat:Connect(function(dt)
+        if not S.dungeonFarm then
+            if farm.target then
+                fire("SetTarget", nil)
+                farm.target = nil
+            end
+            farm.hover = nil
+            farm.acc = 0
+            return
+        end
+        local root = getRoot()
         if not root then return end
 
-        -- 血量保護
+        local t = farm.target
+        if t then
+            local h = t:FindFirstChildOfClass("Humanoid")
+            if (not t.Parent) or (h and h.Health <= 0) then
+                kills += 1
+                lastKill = tick() - farm.startT
+                totalKill += lastKill
+                farm.target = nil
+                t = nil
+            elseif tick() - farm.startT > 25 then
+                ignoreUntil[t] = tick() + 10   -- 25 秒打不死就先跳過它
+                fire("SetTarget", nil)
+                farm.target = nil
+                t = nil
+            end
+        end
+        if not t then
+            local best = pickTarget(root)
+            if best then
+                farm.target = best
+                farm.startT = tick()
+                farm.acc = 0
+                farm.noEnemySince = nil
+                fire("SetTarget", best)
+                t = best
+            elseif not farm.noEnemySince then
+                farm.noEnemySince = tick()
+            end
+        end
+
+        if t then
+            local cf = cframeOf(t)
+            if cf then
+                local pos = cf.Position + Vector3.new(N.tpX, N.tpY, N.tpZ)
+                root.CFrame = CFrame.new(pos)
+                root.AssemblyLinearVelocity = Vector3.zero
+                farm.hover = pos
+            end
+            farm.acc += dt * math.clamp(N.fightSpeed, 0.5, 60)
+            local n = 0
+            while farm.acc >= 1 and n < 6 do
+                fire("PunchEvent", t)
+                farm.acc -= 1
+                n += 1
+            end
+            if farm.acc > 6 then farm.acc = 0 end
+        elseif farm.hover then
+            -- 暫時沒有敵人：停在原地的空中，不要掉下去
+            root.CFrame = CFrame.new(farm.hover)
+            root.AssemblyLinearVelocity = Vector3.zero
+        end
+    end)
+
+    -- 每 0.5 秒：血量保護、統計顯示、完成後重新開始
+    every("dungeonFarm", function() return 0.5 end, function()
+        local hum = getHumanoid()
         if N.exitHp > 0 and hum and hum.MaxHealth > 0
             and hum.Health / hum.MaxHealth * 100 < N.exitHp then
             exitDungeon()
+            farm.hover = nil
             status = "血量過低，已退出副本"
             task.wait(3)
             return
         end
 
-        local enemies = aliveEnemies()
-        if #enemies == 0 then
-            status = "副本內沒有敵人（等待中）"
+        local avg = kills > 0 and totalKill / kills or 0
+        status = string.format("副本：已打死 %d 隻｜上一隻 %.1f 秒｜平均 %.1f 秒｜完成 %d 次%s",
+            kills, lastKill, avg, runs, farm.target and ("｜攻擊 " .. farm.target.Name) or "｜等待敵人")
+
+        if not farm.target then
             local fin = dig(getPg(), "DungeonFinishUI")
             if S.dungeonRestart and fin and fin.Enabled then
+                runs += 1
+                farm.hover = nil
                 exitDungeon()
                 task.wait(2.5)
                 startDungeon()
                 task.wait(3)
-            end
-            return
-        end
-
-        local best, bestD
-        for _, e in ipairs(enemies) do
-            local cf = cframeOf(e)
-            if cf then
-                local d = (cf.Position - root.Position).Magnitude
-                if not bestD or d < bestD then
-                    best, bestD = e, d
-                end
+                farm.noEnemySince = nil
+            elseif farm.noEnemySince and tick() - farm.noEnemySince > 5 then
+                farm.hover = nil   -- 5 秒都沒有敵人，不要一直掛在空中
             end
         end
-        if not best then return end
-
-        status = "攻擊 " .. best.Name .. "（還有 " .. #enemies .. " 隻）"
-        fire("SetTarget", best)
-        local t0 = tick()
-        while S.dungeonFarm and best.Parent and tick() - t0 < 25 do
-            local h2 = best:FindFirstChildOfClass("Humanoid")
-            if h2 and h2.Health <= 0 then break end
-            local cf = cframeOf(best)
-            root = getRoot()
-            if cf and root then
-                root.CFrame = cf * CFrame.new(N.tpX, N.tpY, N.tpZ)
-                root.AssemblyLinearVelocity = Vector3.zero
-            end
-            fire("PunchEvent", best)
-            task.wait(1 / math.max(N.fightSpeed, 0.5))
-        end
-        fire("SetTarget", nil)
     end)
 end
 
