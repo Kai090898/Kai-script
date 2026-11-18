@@ -47,6 +47,90 @@ local lastTap = 0
 local lastWarn = 0
 local DOUBLE_TAP_TIME = 0.4
 
+-- ===== 自訂自動點擊位置 =====
+local customClickOn = false
+local customClickPos = nil
+local pickGui, pickMarker = nil, nil
+local pickOpen = false
+local pickDragging = false
+local pickInput, pickStart, markerStart
+
+local function ensureClickPicker()
+    if pickGui and pickGui.Parent then return end
+    pickGui = Instance.new('ScreenGui')
+    pickGui.Name = 'KaiClickPositionPicker'
+    pickGui.IgnoreGuiInset = true
+    pickGui.ResetOnSpawn = false
+    pickGui.DisplayOrder = 999
+    parentSafe(pickGui)
+    pickMarker = Instance.new('TextButton')
+    pickMarker.Name = 'ClickTarget'
+    pickMarker.Size = UDim2.fromOffset(56, 56)
+    pickMarker.AnchorPoint = Vector2.new(0.5, 0.5)
+    pickMarker.BackgroundColor3 = Color3.fromRGB(35, 150, 255)
+    pickMarker.BackgroundTransparency = 0.25
+    pickMarker.BorderSizePixel = 0
+    pickMarker.Text = '+'
+    pickMarker.TextColor3 = Color3.new(1, 1, 1)
+    pickMarker.TextSize = 30
+    pickMarker.Font = Enum.Font.GothamBold
+    pickMarker.AutoButtonColor = false
+    pickMarker.Active = true
+    pickMarker.Visible = false
+    pickMarker.Parent = pickGui
+    local stroke = Instance.new('UIStroke')
+    stroke.Color = Color3.new(1, 1, 1)
+    stroke.Thickness = 2
+    stroke.Parent = pickMarker
+    local function place(pos)
+        local cam = workspace.CurrentCamera
+        if not cam then return end
+        local size = cam.ViewportSize
+        local x = math.clamp(pos.X, 28, math.max(28, size.X - 28))
+        local y = math.clamp(pos.Y, 28, math.max(28, size.Y - 28))
+        customClickPos = Vector2.new(x, y)
+        pickMarker.Position = UDim2.fromOffset(x, y)
+    end
+    pickMarker.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+            pickDragging = true
+            pickInput = input
+            pickStart = input.Position
+            markerStart = customClickPos or Vector2.new(pickMarker.AbsolutePosition.X + 28, pickMarker.AbsolutePosition.Y + 28)
+        end
+    end)
+    UIS.InputChanged:Connect(function(input)
+        if not pickDragging then return end
+        if input.UserInputType == Enum.UserInputType.MouseMovement or input == pickInput then
+            place(markerStart + Vector2.new(input.Position.X - pickStart.X, input.Position.Y - pickStart.Y))
+        end
+    end)
+    UIS.InputEnded:Connect(function(input)
+        if input == pickInput or (pickInput and pickInput.UserInputType == Enum.UserInputType.MouseButton1 and input.UserInputType == Enum.UserInputType.MouseButton1) then
+            pickDragging = false
+            pickInput = nil
+        end
+    end)
+end
+
+local function setPickerVisible(visible)
+    ensureClickPicker()
+    pickOpen = visible
+    if visible and not customClickPos then
+        local size = workspace.CurrentCamera.ViewportSize
+        customClickPos = Vector2.new(size.X / 2, size.Y / 2)
+    end
+    if visible then
+        pickMarker.Position = UDim2.fromOffset(customClickPos.X, customClickPos.Y)
+    end
+    pickMarker.Visible = visible
+    if not visible then
+        pickDragging = false
+        pickInput = nil
+    end
+end
+-- ===== 自訂位置結束 =====
+
 local function updateInterval()
     if unit == "秒" then
         interval = value
@@ -63,6 +147,10 @@ end
 
 local function click()
     local x, y = getCenter()
+    if customClickOn and customClickPos then
+        x, y = customClickPos.X, customClickPos.Y
+    end
+    -- 選擇器顯示時仍可點擊；啟動自動點擊時會自動收起
 
     -- 選單蓋住螢幕中央時不點，避免點到自己的介面
     if UI:IsOverMenu(x, y) then
@@ -1100,6 +1188,34 @@ local Toggle = Tab:CreateToggle({
     CurrentValue = false,
     Callback = function(v)
         enabled = v
+        if v and pickOpen then setPickerVisible(false) end
+    end,
+})
+
+Tab:CreateSection('自訂點擊位置')
+Tab:CreateButton({
+    Name = '選擇點擊位置（顯示／收起方框）',
+    Callback = function()
+        setPickerVisible(not pickOpen)
+        if pickOpen then
+            notify('選擇點擊位置', '拖曳藍色正方形到目標，再按一次收起', 5)
+        else
+            notify('位置已選擇', '開啟「使用自訂點擊位置」即可使用', 4)
+        end
+    end,
+})
+local tCustomClick
+tCustomClick = Tab:CreateToggle({
+    Name = '使用自訂點擊位置（關閉則點中央）',
+    CurrentValue = false,
+    Callback = function(v)
+        if v and not customClickPos then
+            customClickOn = false
+            notify('尚未選擇位置', '請先選擇並拖動方框', 4)
+            task.defer(function() tCustomClick:Set(false) end)
+            return
+        end
+        customClickOn = v
     end,
 })
 
