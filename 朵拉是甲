@@ -1895,7 +1895,33 @@ do
             end
         end,
     })
+    -- 萬用感應
+    ToolTab:CreateSection("萬用感應")
 
+    local sensorLoading = false
+    ToolTab:CreateButton({
+        Name = "開啟萬用感應",
+        Callback = function()
+            if sensorLoading then
+                return
+            end
+            sensorLoading = true
+            task.spawn(function()
+                local ok, err = pcall(function()
+                    local src = game:HttpGet("https://raw.githubusercontent.com/Kai090898/Kai-script/refs/heads/main/%E8%90%AC%E8%83%BD%E6%9C%B5%E6%8B%89%E9%9B%9E%E9%9B%9E")
+                    local fn, cerr = loadstring(src)
+                    if not fn then
+                        error(cerr)
+                    end
+                    fn()
+                end)
+                sensorLoading = false
+                if not ok then
+                    notify("載入失敗", tostring(err), 6)
+                end
+            end)
+        end,
+    })
     -- 設定檔存取
     FarmAPI.getTools = function()
         local t = {}
