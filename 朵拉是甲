@@ -131,6 +131,19 @@ local function setPickerVisible(visible)
 end
 -- ===== 自訂位置結束 =====
 
+-- ===== 多點自動點擊 =====
+local multiClickOn = false
+local multiPoints = {}
+local multiIndex = 1
+local MULTI_MAX = 5
+local function multiPointLabel()
+    local t = {}
+    for i, p in ipairs(multiPoints) do
+        t[#t+1] = string.format('%d:(%d,%d)', i, math.floor(p.X+0.5), math.floor(p.Y+0.5))
+    end
+    return #t == 0 and '尚未設定' or table.concat(t, ' → ')
+end
+
 local function updateInterval()
     if unit == "秒" then
         interval = value
@@ -145,9 +158,11 @@ local function getCenter()
     return size.X / 2, size.Y / 2
 end
 
-local function click()
+local function click(target)
     local x, y = getCenter()
-    if customClickOn and customClickPos then
+    if target then
+        x, y = target.X, target.Y
+    elseif customClickOn and customClickPos then
         x, y = customClickPos.X, customClickPos.Y
     end
     -- 選擇器顯示時仍可點擊；啟動自動點擊時會自動收起
@@ -175,7 +190,13 @@ end
 task.spawn(function()
     while true do
         if enabled then
-            pcall(click)
+            if multiClickOn and #multiPoints > 0 then
+                local target = multiPoints[multiIndex]
+                multiIndex = (multiIndex % #multiPoints) + 1
+                pcall(click, target)
+            else
+                pcall(click)
+            end
             task.wait(interval)
         else
             task.wait(0.1)
@@ -1216,6 +1237,77 @@ tCustomClick = Tab:CreateToggle({
             return
         end
         customClickOn = v
+    end,
+})
+
+local tMultiClick
+Tab:CreateSection('多點自動點擊')
+Tab:CreateButton({
+    Name = '新增目前方框位置為下一個點（最多5點）',
+    Callback = function()
+        if #multiPoints >= MULTI_MAX then
+            notify('多點點擊', '最多只能設定 5 個點', 4)
+            return
+        end
+        if not customClickPos then
+            setPickerVisible(true)
+            notify('多點點擊', '請先拖曳藍色方框到位置，再按新增', 5)
+            return
+        end
+        multiPoints[#multiPoints+1] = Vector2.new(customClickPos.X, customClickPos.Y)
+        multiIndex = 1
+        notify('已新增第 ' .. #multiPoints .. ' 點', multiPointLabel(), 5)
+    end,
+})
+Tab:CreateButton({
+    Name = '移動方框以選下一個點',
+    Callback = function()
+        setPickerVisible(true)
+        notify('多點點擊', '拖動藍色方框後，按「新增目前方框位置」', 5)
+    end,
+})
+Tab:CreateButton({
+    Name = '查看多點清單',
+    Callback = function()
+        notify('多點清單（' .. #multiPoints .. '/5）', multiPointLabel(), 8)
+    end,
+})
+Tab:CreateButton({
+    Name = '刪除最後一個點',
+    Callback = function()
+        if #multiPoints > 0 then table.remove(multiPoints) end
+        multiIndex = 1
+        if #multiPoints == 0 then
+            multiClickOn = false
+            if tMultiClick then tMultiClick:Set(false) end
+        end
+        notify('多點清單（' .. #multiPoints .. '/5）', multiPointLabel(), 5)
+    end,
+})
+Tab:CreateButton({
+    Name = '清空全部多點',
+    Callback = function()
+        table.clear(multiPoints)
+        multiIndex = 1
+        multiClickOn = false
+        if tMultiClick then tMultiClick:Set(false) end
+        notify('多點點擊', '已清空，恢復原本單點／中央點擊模式', 4)
+    end,
+})
+tMultiClick = Tab:CreateToggle({
+    Name = '使用多點循環點擊（優先於單點）',
+    CurrentValue = false,
+    Callback = function(v)
+        if v and #multiPoints == 0 then
+            multiClickOn = false
+            notify('多點點擊', '請先新增至少一個點', 4)
+            task.defer(function() tMultiClick:Set(false) end)
+            return
+        end
+        multiClickOn = v
+        multiIndex = 1
+        if v and pickOpen then setPickerVisible(false) end
+        notify('多點點擊', v and ('已啟用，依序循環 ' .. #multiPoints .. ' 點') or '已關閉，恢復原本點擊位置', 4)
     end,
 })
 
