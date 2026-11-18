@@ -1,0 +1,1047 @@
+-- ====================================================================
+--  萬用感應（用「卡依ui」做的獨立視窗，只讀取、只記錄，不會改遊戲）
+--
+--  總覽：最新 10 筆即時紀錄（點一行複製那一行）、暫停、關鍵字篩選、複製全部紀錄、複製統計
+--  遠端：感應「你送出」的 Remote、「伺服器傳來」的 Remote、複製重播指令、自動靜音高頻事件
+--  介面：介面打開/關閉/新增/移除、細看某個介面內部、點擊感應（點哪裡就告訴你點到什麼）
+--  物件：Workspace / 介面 / 相機 / ReplicatedStorage / Lighting 新增與移除（同類自動合併計數）
+--  角色：角色狀態血量道具、碰觸、數值與屬性、指定物件監看、提示框、遊戲輸出、聊天、玩家進出
+--  周圍：感應周圍（有提示框、點擊偵測、碰觸感應的東西）
+--
+--  用法：打開想感應的開關 → 去做你要測的事 → 回「總覽」複製紀錄貼給我
+--  事件太多時，用「關鍵字篩選」縮小（多個關鍵字用 | 分開，例如 Egg|Equip）
+-- ====================================================================
+local env = (getgenv and getgenv()) or _G
+
+-- 已經開著的話，直接把視窗叫出來就好
+if env.KaiSensor and env.KaiSensor.alive() then
+    env.KaiSensor.show()
+    return
+end
+
+local UI = loadstring(game:HttpGet("https://raw.githubusercontent.com/Kai090898/Kai-script/refs/heads/main/%E5%8D%A1%E4%BE%9Dui"))()
+
+local Players = game:GetService("Players")
+local RS = game:GetService("ReplicatedStorage")
+local UIS = game:GetService("UserInputService")
+local GuiService = game:GetService("GuiService")
+local LogService = game:GetService("LogService")
+local Lighting = game:GetService("Lighting")
+local LocalPlayer = Players.LocalPlayer
+
+local alive = true
+local t0 = tick()
+
+-- ===== 小工具 =====
+local function notify(title, content, duration)
+    UI:Notify({Title = title, Content = content, Duration = duration or 3})
+end
+local function getPg()
+    return LocalPlayer:FindFirstChild("PlayerGui")
+end
+local function getRoot()
+    local char = LocalPlayer.Character
+    return char and char:FindFirstChild("HumanoidRootPart")
+end
+local function copy(text)
+    if setclipboard then
+        pcall(setclipboard, text)
+        return true
+    end
+    return false
+end
+local function cut(s, n)
+    if utf8 and utf8.len(s) and utf8.len(s) > n then
+        return s:sub(1, utf8.offset(s, n + 1) - 1) .. "…"
+    end
+    return s
+end
+
+local myPrefix = "Players." .. LocalPlayer.Name
+local function pathOf(inst)
+    local ok, full = pcall(function() return inst:GetFullName() end)
+    if not ok then return "?" end
+    if full:sub(1, #myPrefix) == myPrefix then
+        full = "我" .. full:sub(#myPrefix + 1)
+    end
+    return full
+end
+local function isOwn(path)
+    return path:find("KaiUI", 1, true) ~= nil
+end
+
+-- ===== 序列化（顯示用）=====
+local function ser(v, d)
+    d = d or 0
+    local t = typeof(v)
+    if t == "string" then
+        local s = (v:gsub("\n", "\\n"))
+        if #s > 60 then s = s:sub(1, 60) .. "…" end
+        return '"' .. s .. '"'
+    elseif t == "number" then
+        if v == math.floor(v) then return tostring(v) end
+        return string.format("%.3f", v)
+    elseif t == "table" then
+        if d >= 3 then return "{…}" end
+        local parts, c = {}, 0
+        for k, x in pairs(v) do
+            c = c + 1
+            if c > 12 then
+                table.insert(parts, "…")
+                break
+            end
+            table.insert(parts, tostring(k) .. "=" .. ser(x, d + 1))
+        end
+        return "{" .. table.concat(parts, ", ") .. "}"
+    elseif t == "Instance" then
+        return "<" .. pathOf(v) .. ">"
+    end
+    return tostring(v)
+end
+local function serArgs(args)
+    local parts = {}
+    for i = 1, args.n do
+        parts[i] = ser(args[i])
+    end
+    return table.concat(parts, ", ")
+end
+
+-- ===== 轉成可以直接執行的 Lua（重播指令用）=====
+local function q(s)
+    s = s:gsub("\\", "\\\\"):gsub('"', '\\"'):gsub("\n", "\\n"):gsub("\r", "\\r")
+    return '"' .. s .. '"'
+end
+local function instLua(inst)
+    local chain = {}
+    local cur = inst
+    while cur and cur ~= game do
+        table.insert(chain, 1, cur)
+        cur = cur.Parent
+    end
+    if cur ~= game or #chain == 0 then
+        return "nil --[[" .. inst.Name .. "]]"
+    end
+    local out = 'game:GetService("' .. chain[1].Name .. '")'
+    for i = 2, #chain do
+        out = out .. ":WaitForChild(" .. q(chain[i].Name) .. ")"
+    end
+    return out
+end
+local function toLua(v, d)
+    d = d or 0
+    local t = typeof(v)
+    if t == "string" then
+        return q(v)
+    elseif t == "number" then
+        if v ~= v then return "0/0" end
+        if v == math.huge then return "math.huge" end
+        if v == -math.huge then return "-math.huge" end
+        return tostring(v)
+    elseif t == "boolean" or t == "nil" then
+        return tostring(v)
+    elseif t == "Instance" then
+        return instLua(v)
+    elseif t == "Vector3" then
+        return string.format("Vector3.new(%s, %s, %s)", v.X, v.Y, v.Z)
+    elseif t == "Vector2" then
+        return string.format("Vector2.new(%s, %s)", v.X, v.Y)
+    elseif t == "CFrame" then
+        return "CFrame.new(" .. table.concat({v:GetComponents()}, ", ") .. ")"
+    elseif t == "Color3" then
+        return string.format("Color3.new(%s, %s, %s)", v.R, v.G, v.B)
+    elseif t == "EnumItem" then
+        return tostring(v)
+    elseif t == "table" then
+        if d >= 6 then return "{}" end
+        local parts, used = {}, {}
+        for i = 1, #v do
+            parts[#parts + 1] = toLua(v[i], d + 1)
+            used[i] = true
+        end
+        for k, x in pairs(v) do
+            if not used[k] then
+                local ks
+                if type(k) == "string" and k:match("^[%a_][%w_]*$") then
+                    ks = k
+                else
+                    ks = "[" .. toLua(k, d + 1) .. "]"
+                end
+                parts[#parts + 1] = ks .. " = " .. toLua(x, d + 1)
+            end
+        end
+        return "{" .. table.concat(parts, ", ") .. "}"
+    end
+    return "nil --[[" .. t .. "]]"
+end
+local function replayLine(e)
+    local parts = {}
+    for i = 1, e.args.n do
+        parts[i] = toLua(e.args[i])
+    end
+    return instLua(e.remote) .. ":" .. e.method .. "(" .. table.concat(parts, ", ") .. ")"
+end
+
+-- ===== 紀錄核心 =====
+local S = {}                 -- 各感應器的開關
+local C = {                  -- 設定
+    filter = "",
+    autoMute = true,
+    muteLimit = 8,
+    scanRadius = 30,
+    watchPath = "",
+    watchGui = "",
+}
+local paused = false
+local LOG_MAX = 4000
+local logs, counts = {}, {}
+local feedFull = {}          -- 最新在前，最多 FEED_N 筆
+local FEED_N = 10
+local rate, muted = {}, {}
+local totalEvents = 0
+local filterList = {}
+local recent = {}            -- 最近送出的 Remote（重播用）
+
+local function setFilter(text)
+    C.filter = tostring(text or "")
+    filterList = {}
+    for piece in C.filter:lower():gmatch("[^|]+") do
+        piece = piece:gsub("^%s+", ""):gsub("%s+$", "")
+        if piece ~= "" then table.insert(filterList, piece) end
+    end
+end
+local function passFilter(tag, text)
+    if #filterList == 0 then return true end
+    local hay = (tag .. " " .. text):lower()
+    for _, f in ipairs(filterList) do
+        if hay:find(f, 1, true) then return true end
+    end
+    return false
+end
+
+local function push(tag, text)
+    local line = string.format("[%.1f] %s：%s", tick() - t0, tag, text)
+    table.insert(logs, line)
+    if #logs > LOG_MAX + 500 then
+        table.move(logs, 501, #logs, 1)
+        for i = #logs, #logs - 499, -1 do
+            logs[i] = nil
+        end
+    end
+    table.insert(feedFull, 1, line)
+    if #feedFull > FEED_N then table.remove(feedFull) end
+    totalEvents = totalEvents + 1
+end
+
+-- tag = 分類，text = 顯示內容，key = 統計 / 靜音用的名字，w = 這筆代表幾次
+local function emit(tag, text, key, w)
+    if paused or not alive then return end
+    key = key or text
+    local full = tag .. "｜" .. key
+    counts[full] = (counts[full] or 0) + (w or 1)
+    if muted[full] then return end
+    if not passFilter(tag, text) then return end
+    if C.autoMute then
+        local now = tick()
+        local r = rate[full]
+        if not r or now - r.t >= 1 then
+            r = {n = 0, t = now}
+            rate[full] = r
+        end
+        r.n = r.n + 1
+        if r.n > C.muteLimit then
+            muted[full] = true
+            push("系統", "已自動靜音（太頻繁）：" .. cut(full, 60))
+            return
+        end
+    end
+    push(tag, text)
+end
+
+-- ===== 連線管理 =====
+local conns = {}
+local function hold(name, c)
+    conns[name] = conns[name] or {}
+    table.insert(conns[name], c)
+end
+local function release(name)
+    for _, c in ipairs(conns[name] or {}) do
+        pcall(function() c:Disconnect() end)
+    end
+    conns[name] = nil
+end
+
+-- ===== 介面 =====
+local Window = UI:CreateWindow({
+    Name = "萬用感應",
+    GuiName = "KaiUI_Sensor",
+    FloatText = "感",
+    FloatPosition = UDim2.new(0, 10, 0.55, 0),
+    PositionOffset = Vector2.new(60, 40),
+    DisplayOrder = 103,
+    Theme = "black",
+})
+
+local OverTab = Window:CreateTab("總覽")
+local RemoteTab = Window:CreateTab("遠端")
+local GuiTab = Window:CreateTab("介面")
+local ObjTab = Window:CreateTab("物件")
+local CharTab = Window:CreateTab("角色")
+local NearTab = Window:CreateTab("周圍")
+
+local function sensorToggle(tab, label, name, start, default)
+    S[name] = default and true or false
+    local el = tab:CreateToggle({
+        Name = label,
+        CurrentValue = default and true or false,
+        Callback = function(v)
+            S[name] = v
+            release(name)
+            if v and start then
+                local ok, err = pcall(start)
+                if not ok then
+                    push("系統", label .. " 啟動失敗：" .. tostring(err))
+                    notify("啟動失敗", cut(tostring(err), 80), 5)
+                end
+            end
+        end,
+    })
+    return el
+end
+
+local function textInput(tab, label, placeholder, onSet)
+    return tab:CreateInput({
+        Name = label,
+        PlaceholderText = placeholder,
+        Callback = function(text)
+            onSet(tostring(text or ""))
+        end,
+    })
+end
+
+local function numberInput(tab, label, placeholder, key, minv)
+    return tab:CreateInput({
+        Name = label,
+        PlaceholderText = placeholder,
+        Callback = function(text)
+            local n = tonumber(text)
+            if n and n >= minv then
+                C[key] = n
+                notify("已設定", label .. " = " .. n)
+            else
+                notify("輸入錯誤", "請輸入 " .. minv .. " 以上的數字")
+            end
+        end,
+    })
+end
+
+-- ====================================================================
+--  總覽
+-- ====================================================================
+OverTab:CreateSection("即時紀錄（最新在上，點一行複製那一行）")
+local statusBtn = OverTab:CreateButton({Name = "事件 0｜靜音 0", Callback = function() end})
+local feedBtns = {}
+for i = 1, FEED_N do
+    feedBtns[i] = OverTab:CreateButton({
+        Name = "--",
+        Callback = function()
+            if feedFull[i] then
+                notify(copy(feedFull[i]) and "已複製" or "無法複製", cut(feedFull[i], 80), 3)
+            end
+        end,
+    })
+end
+task.spawn(function()
+    while alive do
+        local m = 0
+        for _ in pairs(muted) do m = m + 1 end
+        pcall(function()
+            statusBtn:SetName(string.format("事件 %d｜靜音 %d%s", totalEvents, m, paused and "｜已暫停" or ""))
+            for i = 1, FEED_N do
+                feedBtns[i]:SetName(feedFull[i] and cut(feedFull[i], 48) or "--")
+            end
+        end)
+        task.wait(0.4)
+    end
+end)
+
+OverTab:CreateSection("控制")
+OverTab:CreateToggle({
+    Name = "暫停記錄",
+    CurrentValue = false,
+    Callback = function(v) paused = v end,
+})
+textInput(OverTab, "關鍵字篩選（| 分開，留空 = 全部）", "例如 Egg|Equip", function(text)
+    setFilter(text)
+    notify("篩選", text == "" and "已清除篩選" or ("只記錄含 " .. text .. " 的事件"))
+end)
+OverTab:CreateToggle({
+    Name = "自動靜音太頻繁的事件",
+    CurrentValue = true,
+    Callback = function(v) C.autoMute = v end,
+})
+numberInput(OverTab, "靜音門檻（同一種事件每秒超過幾次）", "預設 8", "muteLimit", 1)
+OverTab:CreateButton({
+    Name = "解除全部靜音",
+    Callback = function()
+        muted, rate = {}, {}
+        notify("靜音", "已全部解除")
+    end,
+})
+OverTab:CreateButton({
+    Name = "清空紀錄",
+    Callback = function()
+        logs, counts, feedFull, muted, rate, recent = {}, {}, {}, {}, {}, {}
+        totalEvents = 0
+        notify("已清空", "紀錄與統計都歸零")
+    end,
+})
+OverTab:CreateButton({
+    Name = "複製全部紀錄",
+    Callback = function()
+        local text = table.concat(logs, "\n")
+        notify(copy(text) and "已複製" or "無法複製", #logs .. " 行", 4)
+        if writefile then pcall(writefile, "KaiSensor.txt", text) end
+    end,
+})
+OverTab:CreateButton({
+    Name = "複製統計（各事件出現次數）",
+    Callback = function()
+        local rows = {}
+        for k, n in pairs(counts) do
+            rows[#rows + 1] = {k = k, n = n}
+        end
+        table.sort(rows, function(a, b) return a.n > b.n end)
+        local out = {}
+        for i, r in ipairs(rows) do
+            if i > 80 then break end
+            out[#out + 1] = string.format("×%d  %s%s", r.n, r.k, muted[r.k] and "（已靜音）" or "")
+        end
+        local text = table.concat(out, "\n")
+        notify(copy(text) and "已複製" or "無法複製", #rows .. " 種事件", 4)
+    end,
+})
+
+-- ====================================================================
+--  遠端
+-- ====================================================================
+RemoteTab:CreateSection("Remote 感應")
+
+-- 送出：攔截 FireServer / InvokeServer。
+-- 注意：攔截函式裡不能呼叫任何 Instance 的方法（會蓋掉 namecall 狀態），
+-- 所以只複製參數，真正的記錄丟到下一個時間點再做。
+local hookDone = false
+local function installHook()
+    if hookDone then return true end
+    if not (hookmetamethod and getnamecallmethod and newcclosure) then
+        return false
+    end
+    local ok = pcall(function()
+        local old
+        old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+            if S.spyOut then
+                local m = getnamecallmethod()
+                if (m == "FireServer" or m == "InvokeServer") and not (checkcaller and checkcaller()) then
+                    local args = {n = select("#", ...), ...}
+                    local target = self
+                    task.defer(function()
+                        pcall(function()
+                            if typeof(target) ~= "Instance" or not string.find(target.ClassName, "Remote") then
+                                return
+                            end
+                            local p = pathOf(target)
+                            table.insert(recent, {remote = target, method = m, args = args})
+                            if #recent > 40 then table.remove(recent, 1) end
+                            emit("送出", p .. (m == "InvokeServer" and "（Invoke）" or "") .. "｜" .. serArgs(args), p)
+                        end)
+                    end)
+                end
+            end
+            return old(self, ...)
+        end))
+    end)
+    hookDone = ok
+    return ok
+end
+
+sensorToggle(RemoteTab, "感應 我送出的 Remote", "spyOut", function()
+    if not installHook() then
+        error("這個執行器不支援 hookmetamethod")
+    end
+end)
+
+-- 收到：連上所有 RemoteEvent 的 OnClientEvent
+sensorToggle(RemoteTab, "感應 伺服器傳來的 Remote", "spyIn", function()
+    local function hookRemote(r)
+        if r:IsA("RemoteEvent") or r.ClassName == "UnreliableRemoteEvent" then
+            local p = pathOf(r)
+            hold("spyIn", r.OnClientEvent:Connect(function(...)
+                local args = {n = select("#", ...), ...}
+                emit("收到", p .. "｜" .. serArgs(args), p)
+            end))
+        end
+    end
+    local roots = {RS, workspace, LocalPlayer, game:GetService("ReplicatedFirst")}
+    for _, root in ipairs(roots) do
+        for _, d in ipairs(root:GetDescendants()) do
+            hookRemote(d)
+        end
+        hold("spyIn", root.DescendantAdded:Connect(hookRemote))
+    end
+end)
+
+RemoteTab:CreateSection("重播指令（把我送出的 Remote 轉成可以直接執行的程式）")
+RemoteTab:CreateButton({
+    Name = "複製最近 1 筆送出的重播指令",
+    Callback = function()
+        local e = recent[#recent]
+        if not e then
+            notify("沒有紀錄", "先打開「感應 我送出的 Remote」再操作一次遊戲", 5)
+            return
+        end
+        local ok, line = pcall(replayLine, e)
+        if ok then
+            notify(copy(line) and "已複製" or "無法複製", cut(line, 80), 5)
+        else
+            notify("轉換失敗", tostring(line), 5)
+        end
+    end,
+})
+RemoteTab:CreateButton({
+    Name = "複製最近 10 筆送出的重播指令",
+    Callback = function()
+        local out = {}
+        for i = math.max(1, #recent - 9), #recent do
+            local ok, line = pcall(replayLine, recent[i])
+            out[#out + 1] = ok and line or ("-- 轉換失敗：" .. tostring(line))
+        end
+        if #out == 0 then
+            notify("沒有紀錄", "先打開「感應 我送出的 Remote」再操作一次遊戲", 5)
+            return
+        end
+        notify(copy(table.concat(out, "\n")) and "已複製" or "無法複製", #out .. " 筆", 4)
+    end,
+})
+
+-- ====================================================================
+--  介面
+-- ====================================================================
+GuiTab:CreateSection("介面開關")
+sensorToggle(GuiTab, "感應 介面打開 / 關閉 / 新增 / 移除", "gui", function()
+    local pg = getPg()
+    if not pg then error("找不到 PlayerGui") end
+    local function watch(g)
+        if g:IsA("ScreenGui") and not g.Name:find("KaiUI", 1, true) then
+            hold("gui", g:GetPropertyChangedSignal("Enabled"):Connect(function()
+                emit("介面", g.Name .. (g.Enabled and " 打開" or " 關閉"), g.Name)
+            end))
+        end
+    end
+    for _, g in ipairs(pg:GetChildren()) do
+        watch(g)
+    end
+    hold("gui", pg.ChildAdded:Connect(function(g)
+        if g:IsA("ScreenGui") and not g.Name:find("KaiUI", 1, true) then
+            emit("介面", g.Name .. " 新增（Enabled=" .. tostring(g.Enabled) .. "）", g.Name .. "新增")
+            watch(g)
+        end
+    end))
+    hold("gui", pg.ChildRemoved:Connect(function(g)
+        if g:IsA("ScreenGui") and not g.Name:find("KaiUI", 1, true) then
+            emit("介面", g.Name .. " 移除", g.Name .. "移除")
+        end
+    end))
+end)
+
+GuiTab:CreateSection("細看某個介面內部（顯示 / 隱藏 / 文字變化）")
+textInput(GuiTab, "介面名稱", "例如 PetsPopup（先用上面的開關看有哪些）", function(text)
+    C.watchGui = text
+    notify("已設定", "要細看的介面 = " .. text)
+end)
+sensorToggle(GuiTab, "感應 該介面內部變化", "guiDeep", function()
+    local pg = getPg()
+    local g = pg and pg:FindFirstChild(C.watchGui)
+    if not g then error("找不到介面「" .. tostring(C.watchGui) .. "」") end
+    local n = 0
+    local function watch(o)
+        if n >= 800 then return end
+        if o:IsA("GuiObject") then
+            n = n + 1
+            local p = pathOf(o)
+            hold("guiDeep", o:GetPropertyChangedSignal("Visible"):Connect(function()
+                emit("介面細節", p .. (o.Visible and " 顯示" or " 隱藏"), p .. "顯示")
+            end))
+            if o:IsA("TextLabel") or o:IsA("TextButton") or o:IsA("TextBox") then
+                hold("guiDeep", o:GetPropertyChangedSignal("Text"):Connect(function()
+                    emit("介面文字", p .. " = " .. cut(o.Text:gsub("\n", " "), 60), p .. "文字")
+                end))
+            end
+        end
+    end
+    for _, d in ipairs(g:GetDescendants()) do
+        watch(d)
+    end
+    hold("guiDeep", g.DescendantAdded:Connect(function(d)
+        if d:IsA("GuiObject") then
+            emit("介面細節", pathOf(d) .. " 新增", g.Name .. "新增")
+            watch(d)
+        end
+    end))
+end)
+
+GuiTab:CreateSection("點擊感應（點哪裡就告訴你點到什麼）")
+do
+    local function describeGui(o)
+        local s = pathOf(o) .. " [" .. o.ClassName .. "]"
+        if o:IsA("TextLabel") or o:IsA("TextButton") or o:IsA("TextBox") then
+            if o.Text ~= "" then
+                s = s .. " 文字=" .. cut((o.Text:gsub("\n", " ")), 40)
+            end
+        elseif o:IsA("ImageButton") or o:IsA("ImageLabel") then
+            s = s .. " 圖片=" .. cut(tostring(o.Image), 40)
+        end
+        local attrs = o:GetAttributes()
+        for k, v in pairs(attrs) do
+            s = s .. " 屬性" .. k .. "=" .. ser(v)
+        end
+        return s
+    end
+
+    local function describePart(p)
+        local s = pathOf(p) .. " [" .. p.ClassName .. "]"
+        for k, v in pairs(p:GetAttributes()) do
+            s = s .. " 屬性" .. k .. "=" .. ser(v)
+        end
+        local n = 0
+        for _, c in ipairs(p:GetDescendants()) do
+            if c:IsA("ProximityPrompt") then
+                s = s .. " ｜提示框「" .. c.ActionText .. "」"
+            elseif c:IsA("ClickDetector") then
+                s = s .. " ｜點擊偵測"
+            elseif c.ClassName == "TouchTransmitter" then
+                s = s .. " ｜碰觸感應"
+            elseif c:IsA("ValueBase") then
+                s = s .. " ｜" .. c.Name .. "=" .. ser(c.Value)
+            end
+            n = n + 1
+            if n > 40 then break end
+        end
+        return s
+    end
+
+    local function probeAt(x, y)
+        local pg = getPg()
+        local list, seen = {}, {}
+        if pg then
+            local inset = GuiService:GetGuiInset()
+            for _, yy in ipairs({y, y + inset.Y, y - inset.Y}) do
+                local ok, objs = pcall(function() return pg:GetGuiObjectsAtPosition(x, yy) end)
+                if ok and #objs > 0 then
+                    for _, o in ipairs(objs) do
+                        if not seen[o] then
+                            seen[o] = true
+                            table.insert(list, o)
+                        end
+                    end
+                    break
+                end
+            end
+        end
+        local shownGui = 0
+        for _, o in ipairs(list) do
+            local p = pathOf(o)
+            if not isOwn(p) then
+                shownGui = shownGui + 1
+                emit(shownGui == 1 and "點擊介面" or "點擊介面（下層）", describeGui(o), p)
+                if shownGui >= 5 then break end
+            end
+        end
+        local cam = workspace.CurrentCamera
+        if cam then
+            local ray = cam:ScreenPointToRay(x, y)
+            local params = RaycastParams.new()
+            params.FilterType = Enum.RaycastFilterType.Exclude
+            params.FilterDescendantsInstances = {LocalPlayer.Character}
+            local res = workspace:Raycast(ray.Origin, ray.Direction * 1000, params)
+            if res and res.Instance then
+                emit("點擊物件", describePart(res.Instance), pathOf(res.Instance))
+            end
+        end
+    end
+
+    sensorToggle(GuiTab, "感應 點擊（介面與 3D 物件）", "click", function()
+        hold("click", UIS.InputBegan:Connect(function(input)
+            local ut = input.UserInputType
+            if ut == Enum.UserInputType.MouseButton1 or ut == Enum.UserInputType.Touch then
+                local pos = input.Position
+                task.defer(function()
+                    local ok, err = pcall(probeAt, pos.X, pos.Y)
+                    if not ok then push("系統", "點擊感應出錯：" .. tostring(err)) end
+                end)
+            end
+        end))
+    end)
+end
+
+-- ====================================================================
+--  物件
+-- ====================================================================
+ObjTab:CreateSection("新增 / 移除（同一種物件一秒內自動合併成「×數量」）")
+local batchAdd, batchRem = {}, {}
+local function objKey(d)
+    local p = pathOf(d)
+    if isOwn(p) then return nil end
+    return (p:gsub("%d+", "#")) .. " [" .. d.ClassName .. "]"
+end
+local function bump(b, d)
+    local k = objKey(d)
+    if k then b[k] = (b[k] or 0) + 1 end
+end
+local function flush(tag, b)
+    if next(b) == nil then return end
+    local rows = {}
+    for k, n in pairs(b) do
+        rows[#rows + 1] = {k = k, n = n}
+    end
+    for k in pairs(b) do
+        b[k] = nil
+    end
+    table.sort(rows, function(a, c) return a.n > c.n end)
+    for i = 1, math.min(#rows, 8) do
+        emit(tag, string.format("×%d %s", rows[i].n, rows[i].k), rows[i].k, rows[i].n)
+    end
+    if #rows > 8 then
+        emit(tag, "…另外還有 " .. (#rows - 8) .. " 種", tag .. "其他")
+    end
+end
+task.spawn(function()
+    while alive do
+        task.wait(1)
+        pcall(flush, "新增", batchAdd)
+        pcall(flush, "移除", batchRem)
+    end
+end)
+
+S.objAdd, S.objRem = true, true
+ObjTab:CreateToggle({
+    Name = "要看「新增」",
+    CurrentValue = true,
+    Callback = function(v) S.objAdd = v end,
+})
+ObjTab:CreateToggle({
+    Name = "要看「移除」",
+    CurrentValue = true,
+    Callback = function(v) S.objRem = v end,
+})
+
+local function watchRoot(name, getRoot2)
+    return function()
+        local root = getRoot2()
+        if not root then error("找不到這個位置") end
+        hold(name, root.DescendantAdded:Connect(function(d)
+            if S.objAdd then bump(batchAdd, d) end
+        end))
+        hold(name, root.DescendantRemoving:Connect(function(d)
+            if S.objRem then bump(batchRem, d) end
+        end))
+    end
+end
+ObjTab:CreateSection("要感應哪裡")
+sensorToggle(ObjTab, "Workspace（遊戲世界）", "obj_ws", watchRoot("obj_ws", function() return workspace end))
+sensorToggle(ObjTab, "相機（開蛋動畫之類會長在這裡）", "obj_cam", watchRoot("obj_cam", function() return workspace.CurrentCamera end))
+sensorToggle(ObjTab, "介面（PlayerGui）", "obj_gui", watchRoot("obj_gui", getPg))
+sensorToggle(ObjTab, "ReplicatedStorage", "obj_rs", watchRoot("obj_rs", function() return RS end))
+sensorToggle(ObjTab, "Lighting", "obj_light", watchRoot("obj_light", function() return Lighting end))
+
+-- ====================================================================
+--  角色與其他
+-- ====================================================================
+CharTab:CreateSection("角色")
+do
+    local function hookChar(char)
+        local hum = char:WaitForChild("Humanoid", 5)
+        if not (S.char and hum) then return end
+        hold("char", hum.StateChanged:Connect(function(old, new)
+            emit("角色", "狀態 " .. old.Name .. " → " .. new.Name, "狀態")
+        end))
+        hold("char", hum.HealthChanged:Connect(function(h)
+            emit("角色", string.format("血量 %.0f / %.0f", h, hum.MaxHealth), "血量")
+        end))
+        hold("char", hum.Died:Connect(function()
+            emit("角色", "死亡", "死亡")
+        end))
+        for _, prop in ipairs({"WalkSpeed", "JumpPower", "JumpHeight"}) do
+            pcall(function()
+                hold("char", hum:GetPropertyChangedSignal(prop):Connect(function()
+                    emit("角色", prop .. " = " .. ser(hum[prop]), prop)
+                end))
+            end)
+        end
+        hold("char", char.ChildAdded:Connect(function(c)
+            if c:IsA("Tool") then emit("角色", "拿起 " .. c.Name, "拿起") end
+        end))
+        hold("char", char.ChildRemoved:Connect(function(c)
+            if c:IsA("Tool") then emit("角色", "放下 " .. c.Name, "放下") end
+        end))
+    end
+    sensorToggle(CharTab, "感應 角色（狀態、血量、速度、道具、重生）", "char", function()
+        hold("char", LocalPlayer.CharacterAdded:Connect(function(char)
+            emit("角色", "重生", "重生")
+            task.spawn(hookChar, char)
+        end))
+        local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
+        if bp then
+            hold("char", bp.ChildAdded:Connect(function(c) emit("背包", "新增 " .. c.Name, "背包新增") end))
+            hold("char", bp.ChildRemoved:Connect(function(c) emit("背包", "移除 " .. c.Name, "背包移除") end))
+        end
+        if LocalPlayer.Character then
+            task.spawn(hookChar, LocalPlayer.Character)
+        end
+    end)
+
+    local touchLast = {}
+    local function hookTouch(char)
+        task.wait(0.5)
+        if not S.touch then return end
+        for _, p in ipairs(char:GetDescendants()) do
+            if p:IsA("BasePart") then
+                hold("touch", p.Touched:Connect(function(o)
+                    if o:IsDescendantOf(char) then return end
+                    local path = pathOf(o)
+                    local key = path:gsub("%d+", "#")
+                    local now = tick()
+                    if touchLast[key] and now - touchLast[key] < 2 then return end
+                    touchLast[key] = now
+                    local extra = ""
+                    if o:FindFirstChildOfClass("TouchTransmitter") then extra = " ｜有碰觸感應" end
+                    emit("碰觸", path .. " [" .. o.ClassName .. "]" .. extra, key)
+                end))
+            end
+        end
+    end
+    sensorToggle(CharTab, "感應 碰觸（我碰到什麼，同一個 2 秒只記一次）", "touch", function()
+        hold("touch", LocalPlayer.CharacterAdded:Connect(function(char)
+            task.spawn(hookTouch, char)
+        end))
+        if LocalPlayer.Character then
+            task.spawn(hookTouch, LocalPlayer.Character)
+        end
+    end)
+end
+
+CharTab:CreateSection("數值與屬性")
+do
+    sensorToggle(CharTab, "感應 我的數值（leaderstats、Value、屬性）", "values", function()
+        local function watch(v)
+            if v:IsA("ValueBase") then
+                local p = pathOf(v)
+                if isOwn(p) then return end
+                hold("values", v.Changed:Connect(function(val)
+                    emit("數值", p .. " = " .. ser(val), p)
+                end))
+            end
+        end
+        for _, d in ipairs(LocalPlayer:GetDescendants()) do
+            watch(d)
+        end
+        hold("values", LocalPlayer.DescendantAdded:Connect(watch))
+        hold("values", LocalPlayer.AttributeChanged:Connect(function(n)
+            emit("屬性", "玩家." .. n .. " = " .. ser(LocalPlayer:GetAttribute(n)), "玩家." .. n)
+        end))
+        local function watchChar(char)
+            hold("values", char.AttributeChanged:Connect(function(n)
+                emit("屬性", "角色." .. n .. " = " .. ser(char:GetAttribute(n)), "角色." .. n)
+            end))
+        end
+        if LocalPlayer.Character then watchChar(LocalPlayer.Character) end
+        hold("values", LocalPlayer.CharacterAdded:Connect(watchChar))
+    end)
+
+    -- 路徑解析：支援 game.X.Y、Workspace.X、ReplicatedStorage.X、LocalPlayer.X，以及紀錄裡的「我.X」
+    local function resolvePath(text)
+        local cur = game
+        local parts = {}
+        for p in tostring(text or ""):gmatch("[^%.]+") do
+            p = p:gsub("^%s+", ""):gsub("%s+$", "")
+            if p ~= "" then table.insert(parts, p) end
+        end
+        if #parts == 0 then return nil, "路徑是空的" end
+        local i = 1
+        if parts[1] == "game" then
+            i = 2
+        elseif parts[1] == "我" or parts[1] == "LocalPlayer" then
+            cur = LocalPlayer
+            i = 2
+        end
+        for j = i, #parts do
+            local nxt
+            if cur == game then
+                pcall(function() nxt = game:GetService(parts[j]) end)
+            end
+            nxt = nxt or cur:FindFirstChild(parts[j])
+            if not nxt then return nil, "找不到 " .. parts[j] end
+            cur = nxt
+        end
+        return cur
+    end
+
+    textInput(CharTab, "指定物件路徑", "例如 Workspace.Camera.EggOpenMap（可直接貼紀錄裡的路徑）", function(text)
+        C.watchPath = text
+        notify("已設定", "監看路徑 = " .. text)
+    end)
+    sensorToggle(CharTab, "感應 指定物件（屬性、屬性值、子孫新增移除）", "watch", function()
+        local inst, err = resolvePath(C.watchPath)
+        if not inst then error(err or "路徑錯誤") end
+        local p = pathOf(inst)
+        if inst:IsA("ValueBase") then
+            hold("watch", inst.Changed:Connect(function(val)
+                emit("監看", p .. " = " .. ser(val), p)
+            end))
+        else
+            hold("watch", inst.Changed:Connect(function(prop)
+                local ok, val = pcall(function() return inst[prop] end)
+                emit("監看", p .. "." .. prop .. " = " .. (ok and ser(val) or "?"), p .. "." .. prop)
+            end))
+        end
+        hold("watch", inst.AttributeChanged:Connect(function(n)
+            emit("監看", p .. " 屬性 " .. n .. " = " .. ser(inst:GetAttribute(n)), p .. "屬性" .. n)
+        end))
+        hold("watch", inst.DescendantAdded:Connect(function(d) bump(batchAdd, d) end))
+        hold("watch", inst.DescendantRemoving:Connect(function(d) bump(batchRem, d) end))
+        push("系統", "開始監看 " .. p)
+    end)
+end
+
+CharTab:CreateSection("提示框 / 遊戲輸出 / 聊天 / 玩家")
+sensorToggle(CharTab, "感應 提示框（ProximityPrompt）", "prompt", function()
+    local PPS = game:GetService("ProximityPromptService")
+    hold("prompt", PPS.PromptShown:Connect(function(prompt)
+        emit("提示框", pathOf(prompt) .. " 出現｜" .. prompt.ActionText .. "｜" .. prompt.ObjectText, pathOf(prompt) .. "出現")
+    end))
+    hold("prompt", PPS.PromptHidden:Connect(function(prompt)
+        emit("提示框", pathOf(prompt) .. " 消失", pathOf(prompt) .. "消失")
+    end))
+    hold("prompt", PPS.PromptTriggered:Connect(function(prompt)
+        emit("提示框", pathOf(prompt) .. " 被觸發｜" .. prompt.ActionText, pathOf(prompt) .. "觸發")
+    end))
+end)
+sensorToggle(CharTab, "感應 遊戲輸出（print / warn / error）", "output", function()
+    hold("output", LogService.MessageOut:Connect(function(msg, mt)
+        local kind = (mt.Name:gsub("Message", ""))
+        local key = (kind .. msg:sub(1, 24)):gsub("%d+", "#")
+        emit("輸出", kind .. "｜" .. cut(msg, 120), key)
+    end))
+end)
+sensorToggle(CharTab, "感應 聊天與系統訊息", "chat", function()
+    local ok, TCS = pcall(function() return game:GetService("TextChatService") end)
+    if ok and TCS then
+        pcall(function()
+            hold("chat", TCS.MessageReceived:Connect(function(msg)
+                local who = msg.TextSource and msg.TextSource.Name or "系統"
+                emit("聊天", who .. "：" .. cut(msg.Text, 100), who)
+            end))
+        end)
+    end
+    for _, pl in ipairs(Players:GetPlayers()) do
+        hold("chat", pl.Chatted:Connect(function(m)
+            emit("聊天", pl.Name .. "：" .. cut(m, 100), pl.Name)
+        end))
+    end
+    hold("chat", Players.PlayerAdded:Connect(function(pl)
+        hold("chat", pl.Chatted:Connect(function(m)
+            emit("聊天", pl.Name .. "：" .. cut(m, 100), pl.Name)
+        end))
+    end))
+end)
+sensorToggle(CharTab, "感應 玩家進出", "players", function()
+    hold("players", Players.PlayerAdded:Connect(function(pl)
+        emit("玩家", pl.Name .. " 進來了", "進來")
+    end))
+    hold("players", Players.PlayerRemoving:Connect(function(pl)
+        emit("玩家", pl.Name .. " 離開了", "離開")
+    end))
+end)
+
+-- ====================================================================
+--  周圍
+-- ====================================================================
+NearTab:CreateSection("感應周圍（找出有提示框、點擊偵測、碰觸感應的東西）")
+numberInput(NearTab, "掃描半徑", "預設 30", "scanRadius", 1)
+NearTab:CreateButton({
+    Name = "感應周圍（結果會出現在總覽）",
+    Callback = function()
+        local root = getRoot()
+        if not root then
+            notify("沒有角色", "等角色出現再試", 4)
+            return
+        end
+        local r = C.scanRadius
+        local rows, seen = {}, {}
+        local function posOf(o)
+            if o:IsA("BasePart") then return o.Position end
+            if o:IsA("Attachment") then return o.WorldPosition end
+            if o:IsA("Model") then return o:GetPivot().Position end
+        end
+        local function ownerOf(d)
+            local cur = d.Parent
+            while cur and cur ~= workspace do
+                if posOf(cur) then return cur end
+                cur = cur.Parent
+            end
+        end
+        for _, d in ipairs(workspace:GetDescendants()) do
+            local kind
+            if d:IsA("ProximityPrompt") then
+                kind = "提示框「" .. d.ActionText .. "」"
+            elseif d:IsA("ClickDetector") then
+                kind = "點擊偵測"
+            elseif d.ClassName == "TouchTransmitter" then
+                kind = "碰觸感應"
+            end
+            if kind then
+                local owner = ownerOf(d)
+                local pos = owner and posOf(owner)
+                if pos then
+                    local dist = (pos - root.Position).Magnitude
+                    if dist <= r then
+                        local key = tostring(owner)
+                        local row = seen[owner]
+                        if not row then
+                            row = {path = pathOf(owner), dist = dist, kinds = {}}
+                            seen[owner] = row
+                            table.insert(rows, row)
+                        end
+                        table.insert(row.kinds, kind)
+                    end
+                end
+            end
+        end
+        table.sort(rows, function(a, b) return a.dist < b.dist end)
+        push("周圍", string.format("半徑 %d 內共 %d 個東西", r, #rows))
+        for i, row in ipairs(rows) do
+            if i > 25 then
+                push("周圍", "…還有 " .. (#rows - 25) .. " 個沒顯示")
+                break
+            end
+            push("周圍", string.format("距離 %.0f｜%s｜%s", row.dist, row.path, table.concat(row.kinds, "、")))
+        end
+        notify("感應周圍", #rows .. " 個東西，結果在「總覽」", 4)
+    end,
+})
+
+-- ===== 關閉視窗時：停掉所有感應 =====
+UI:OnClose(function()
+    alive = false
+    for k in pairs(S) do
+        S[k] = false
+    end
+    for name in pairs(conns) do
+        release(name)
+    end
+end)
+
+env.KaiSensor = {
+    alive = function() return alive end,
+    show = function() UI:SetVisibility(true) end,
+}
+
+notify("萬用感應", "載入完成，到各分頁打開想感應的開關", 4)
