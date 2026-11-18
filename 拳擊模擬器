@@ -6,14 +6,15 @@
 --   農場：自動訓練 / 自動戰鬥（按畫面左下角的按鈕）、自動點擊(試驗)、
 --         自動領遊玩禮物 ✔、自動領礦工 ✔、撿取範圍內掉落物(試驗)、
 --         自動飛升(試驗)、自動轉盤(試驗)
---   孵蛋：自動孵蛋 ✔、瞬間開蛋、清除開蛋動畫殘留（避免越開越卡）
+--   孵蛋：自動孵蛋 ✔、瞬間開蛋、清除開蛋動畫殘留
+--         （介面 + 3D 模型都會清；3D 模型在 Camera.EggOpenMap.PetOpeningModels）
 --   商店：自動買裝備 ✔、自動許願 ✔（大願已驗證，小/中願名稱是猜的）、
 --         自動裝備最佳寵物(試驗)
 --   寵物：自動合成寵物（金色 ✔ / 彩虹、惡魔為依樣畫葫蘆）
+--   裝備：自動合成裝備 ✔（PlayerMergeEquipment，可選裝備名稱與合成到的稀有度）
 --   傳送：傳到各個世界 ✔
 --   設定：防掛機、關閉 3D 渲染、去霧、低畫質、重生
---   副本：開始 / 退出副本 ✔、副本自動刷（傳到敵人上方攻擊）✔、完成後自動重開、離開隊伍 ✔
---  還沒做：副本自動邀請 / 接受、PVP、Power Core、自動領任務 / UGC、合成裝備
+--  還沒做：副本與 PVP、Power Core、自動領任務 / UGC
 -- ====================================================================
 local env = (getgenv and getgenv()) or _G
 
@@ -71,13 +72,8 @@ end
 
 -- Remote：先找 Events 資料夾，再找 ReplicatedStorage 根目錄
 local Events = RS:WaitForChild("Events", 10)
-local rcache = {}
 local function getRemote(name)
-    local r = rcache[name]
-    if r and r.Parent then return r end
-    r = (Events and Events:FindFirstChild(name)) or RS:FindFirstChild(name)
-    rcache[name] = r
-    return r
+    return (Events and Events:FindFirstChild(name)) or RS:FindFirstChild(name)
 end
 local function fire(name, ...)
     local r = getRemote(name)
@@ -182,24 +178,23 @@ local S = {}        -- 各功能的開關（只在這個執行期間有效）
 local N = {         -- 數值設定
     clickSpeed = 1.2,
     giftCount = 12,
-    hatchDelay = 0.3,
-    cleanAge = 2,
+    hatchDelay = 1.2,
+    cleanAge = 3,
     shopDelay = 5,
     mergeAmount = 5,
     mergeDelay = 0.6,
+    equipBatch = 3,
+    equipDelay = 0.6,
     magnetRange = 60,
-    tpX = 0,
-    tpY = 12.4,
-    tpZ = 0,
-    fightSpeed = 10,
-    exitHp = 0,
 }
 local T = {         -- 文字 / 選項設定
     egg = "",
     eggCustom = "",
-    hatchMode = "事件",
+    hatchMode = "自動",
     petName = "",
     mergeTier = "Golden",
+    equipNames = "",
+    equipTarget = "Mythic",
     teleport = "1",
 }
 local status = "--"
@@ -219,7 +214,7 @@ local function every(name, getDelay, fn)
                     blog(name .. " 錯誤：" .. tostring(err))
                     task.wait(1)
                 end
-                task.wait(math.max(getDelay(), 0.03))
+                task.wait(math.max(getDelay(), 0.1))
             else
                 task.wait(0.3)
             end
@@ -242,7 +237,7 @@ local FarmTab = Window:CreateTab("農場")
 local EggTab = Window:CreateTab("孵蛋")
 local ShopTab = Window:CreateTab("商店")
 local PetTab = Window:CreateTab("寵物")
-local DungeonTab = Window:CreateTab("副本")
+local EquipTab = Window:CreateTab("裝備")
 local TpTab = Window:CreateTab("傳送")
 local SetTab = Window:CreateTab("設定")
 
@@ -484,9 +479,9 @@ do
     })
     regText("eggCustom", iCustom, function() return T.eggCustom end, function(v) T.eggCustom = v end)
 
-    local MODES = {"事件", "自動", "Open3"}
+    local MODES = {"自動", "Open3", "事件"}
     local dMode = EggTab:CreateDropdown({
-        Name = "孵蛋方式（事件 = 一直送，不管動畫播到哪；自動 = 有 Open 按鈕就按）",
+        Name = "孵蛋方式（自動 = 有 Open 按鈕就按，沒有就送事件）",
         Options = MODES,
         CurrentOption = {T.hatchMode},
         Callback = function(opt)
@@ -496,7 +491,7 @@ do
     regDropdown("hatchMode", dMode, function() return T.hatchMode end, function(v) T.hatchMode = v end)
 
     addToggle(EggTab, "自動孵蛋（要站在蛋旁邊）", "hatch")
-    addNumber(EggTab, "孵蛋間隔（秒）", "預設 0.3，事件方式可以調到 0.05", "hatchDelay", 0.05)
+    addNumber(EggTab, "孵蛋間隔（秒）", "預設 1.2", "hatchDelay", 0.3)
     addToggle(EggTab, "孵蛋前先傳送到蛋旁邊", "eggTeleport")
 
     EggTab:CreateButton({
@@ -540,21 +535,22 @@ do
         end
         hatchCount += 1
         status = string.format("已孵蛋 %d 次（%s，%s）", hatchCount, egg, used and "按鈕" or "事件")
+        if S.instantOpen then
+            task.wait(0.15)
+            for _, n in ipairs({"PetOpenUI", "PetOpenUIOLD"}) do
+                local g = dig(getPg(), n)
+                if g then g.Enabled = false end
+            end
+        end
     end
     every("hatch", function() return N.hatchDelay end, hatchOnce)
-
-    -- 瞬間開蛋：不管動畫播到哪，一直把開蛋畫面關掉（跟孵蛋分開跑，不會拖慢孵蛋速度）
-    every("instantOpen", function() return 0.1 end, function()
-        for _, n in ipairs({"PetOpenUI", "PetOpenUIOLD"}) do
-            local g = dig(getPg(), n)
-            if g and g.Enabled then g.Enabled = false end
-        end
-    end)
 end
 
 EggTab:CreateSection("開蛋動畫（避免越開越卡）")
 do
-    -- 記下開蛋介面「原本就有」的東西，之後新長出來的（動畫複製品）過一陣子就清掉
+    local removed = 0
+
+    -- 一、介面：PlayerGui 的 PetOpenUI。記下原本就有的東西，之後新長出來的過一陣子就清掉
     local baseline = {}
     local born = {}
     local hooked = {}
@@ -583,8 +579,7 @@ do
     end
     hookAll()
 
-    local removed = 0
-    local function clean(maxAge)
+    local function cleanUI(maxAge)
         hookAll()
         local now = tick()
         for d, t in pairs(born) do
@@ -598,8 +593,58 @@ do
         end
     end
 
+    -- 二、3D 模型：Workspace.Camera.EggOpenMap.PetOpeningModels
+    -- 診斷結果：每次開蛋，遊戲會在這裡複製出寵物模型（一次大約 260 個物件），
+    -- 開太快時遊戲來不及清，就會一直留在畫面上。
+    -- 載入腳本時就已經在裡面的東西會被保護起來（可能是遊戲自己要用的樣板），
+    -- 只清腳本載入之後新長出來的。
+    local function openingFolder()
+        local cam = workspace.CurrentCamera or workspace:FindFirstChild("Camera")
+        local map = cam and cam:FindFirstChild("EggOpenMap")
+        return map and map:FindFirstChild("PetOpeningModels")
+    end
+
+    local modelBase = {}
+    local modelBorn = {}
+    do
+        local f = openingFolder()
+        if f then
+            for _, c in ipairs(f:GetChildren()) do
+                modelBase[c] = true
+            end
+        end
+    end
+
+    local function cleanModels(maxAge)
+        local f = openingFolder()
+        if not f then return end
+        local now = tick()
+        for _, c in ipairs(f:GetChildren()) do
+            if not modelBase[c] then
+                local t = modelBorn[c]
+                if not t then
+                    t = now
+                    modelBorn[c] = t
+                end
+                if now - t >= maxAge then
+                    modelBorn[c] = nil
+                    pcall(function() c:Destroy() end)
+                    removed += 1
+                end
+            end
+        end
+        for c in pairs(modelBorn) do
+            if not c.Parent then modelBorn[c] = nil end
+        end
+    end
+
+    local function clean(maxAge)
+        cleanUI(maxAge)
+        cleanModels(maxAge)
+    end
+
     addToggle(EggTab, "清除開蛋動畫殘留", "cleanHatch")
-    addNumber(EggTab, "動畫保留幾秒後清除", "預設 2，連續孵蛋時可以調到 1", "cleanAge", 0.5)
+    addNumber(EggTab, "動畫保留幾秒後清除", "預設 3，越小越乾淨，但太小會把正在播的動畫弄壞", "cleanAge", 0.5)
     addToggle(EggTab, "瞬間開蛋（開完立刻關掉開蛋畫面）", "instantOpen")
     every("cleanHatch", function() return 0.5 end, function()
         clean(N.cleanAge)
@@ -801,228 +846,312 @@ do
 end
 
 -- ====================================================================
---  副本
+--  裝備
 -- ====================================================================
-DungeonTab:CreateSection("副本")
+EquipTab:CreateSection("合成裝備（3 件同名同稀有度 → 1 件高一級）")
 do
-    -- 探測時看過：DungeonEvent:FireServer("StartGUIUpdate") → ("StartDungeon") → ("Exit")
-    --            敵人在 workspace.BreakableParts.Dungeon 底下（Noob、BuffGuy）
-    --            攻擊 = SetTarget:FireServer(敵人) + PunchEvent:FireServer(敵人)
-    --            PartyEvent:FireServer("LeaveParty")
-    local function enemyFolder()
-        return dig(workspace, "BreakableParts", "Dungeon")
+    -- 診斷時看過：
+    --   送出  Events.PlayerMergeEquipment:FireServer({"937", "1012", "940"})   （三件裝備的編號，字串）
+    --   收到  GenerateEquipment（伺服器傳整個背包：編號 = {name, rarity, equipped}）
+    -- 稀有度由低到高。Common / Rare / Legendary / Mythic 是看過的字串，Epic 是你確認過的，
+    -- Secret 是猜的（合成介面上顯示 ???），所以放在最後當試驗。
+    local LADDER = {"Common", "Rare", "Epic", "Legendary", "Mythic", "Secret"}
+    local RANK = {}
+    for i, n in ipairs(LADDER) do
+        RANK[n:lower()] = i
     end
 
-    local function aliveEnemies()
-        local list = {}
-        local f = enemyFolder()
-        if not f then return list end
-        for _, e in ipairs(f:GetChildren()) do
-            if e.Parent and (e:IsA("Model") or e:IsA("BasePart")) then
-                local hum = e:FindFirstChildOfClass("Humanoid")
-                if not hum or hum.Health > 0 then
-                    table.insert(list, e)
-                end
+    -- 名稱比對：去掉空白、符號、大小寫（Golden Clover = GoldenClover）
+    local function norm(s)
+        return (tostring(s or ""):lower():gsub("[^%w]", ""))
+    end
+
+    -- ===== 取得背包 =====
+    -- 1) 優先用伺服器傳來的 GenerateEquipment（之後每次合成伺服器都會再傳一次最新的）
+    -- 2) 載入腳本後還沒收過的話，用 getgc 在記憶體裡找遊戲自己存的背包表
+    local inv, invSource, gcAt = nil, "無", 0
+    local hookedEvent = false
+
+    local function looksLikeInv(t)
+        if type(t) ~= "table" then return false end
+        local seen = 0
+        for _, v in pairs(t) do
+            seen += 1
+            if type(v) == "table" and type(v.name) == "string" and type(v.rarity) == "string" then
+                return true
+            end
+            if seen >= 8 then break end
+        end
+        return false
+    end
+
+    local function hookInventoryEvent()
+        if hookedEvent then return end
+        for _, r in ipairs(RS:GetDescendants()) do
+            if r:IsA("RemoteEvent") and r.Name == "GenerateEquipment" then
+                hookedEvent = true
+                r.OnClientEvent:Connect(function(tbl)
+                    if looksLikeInv(tbl) then
+                        inv = tbl
+                        invSource = "伺服器"
+                    end
+                end)
+                return
             end
         end
-        return list
+    end
+    hookInventoryEvent()
+
+    local function countKeys(t)
+        local n = 0
+        for _ in pairs(t) do n += 1 end
+        return n
     end
 
-    local function cframeOf(e)
-        local ok, cf = pcall(function()
-            if e:IsA("Model") then return e:GetPivot() end
-            return e.CFrame
-        end)
-        return ok and cf or nil
-    end
-
-    local function startDungeon()
-        fire("DungeonEvent", "StartGUIUpdate")
-        task.wait(0.4)
-        fire("DungeonEvent", "StartDungeon")
-        blog("已送出開始副本")
-    end
-    local function exitDungeon()
-        fire("DungeonEvent", "Exit")
-        blog("已送出退出副本")
-    end
-
-    DungeonTab:CreateButton({
-        Name = "開始副本（要在副本入口那邊）",
-        Callback = function()
-            task.spawn(startDungeon)
-            notify("副本", "已送出開始副本", 3)
-        end,
-    })
-    DungeonTab:CreateButton({
-        Name = "退出副本",
-        Callback = function()
-            exitDungeon()
-            notify("副本", "已送出退出副本", 3)
-        end,
-    })
-    DungeonTab:CreateButton({
-        Name = "離開隊伍",
-        Callback = function()
-            fire("PartyEvent", "LeaveParty")
-            notify("副本", "已送出離開隊伍", 3)
-        end,
-    })
-
-    -- 副本自動刷：每一幀都把角色鎖在敵人頭上（不會掉下來被打），打死一隻立刻換下一隻
-    local farm = {target = nil, acc = 0, hover = nil, startT = 0, noEnemySince = nil}
-    local kills, runs, lastKill, totalKill = 0, 0, 0, 0
-    local ignoreUntil = setmetatable({}, {__mode = "k"})
-
-    addToggle(DungeonTab, "副本自動刷（待在敵人頭上攻擊）", "dungeonFarm", function(v)
-        if v then
-            kills, runs, lastKill, totalKill = 0, 0, 0, 0
-        end
-    end)
-    addToggle(DungeonTab, "副本完成後自動重新開始", "dungeonRestart")
-
-    local PRIORITIES = {"最近", "先打王（血最多）", "先打血最少"}
-    T.dungeonPriority = "最近"
-    local dPri = DungeonTab:CreateDropdown({
-        Name = "目標優先順序",
-        Options = PRIORITIES,
-        CurrentOption = {T.dungeonPriority},
-        Callback = function(opt)
-            T.dungeonPriority = type(opt) == "table" and opt[1] or opt
-        end,
-    })
-    regDropdown("dungeonPriority", dPri, function() return T.dungeonPriority end, function(v)
-        T.dungeonPriority = v
-    end)
-
-    addNumber(DungeonTab, "攻擊速度（每秒幾次，上限 60）", "預設 10；伺服器有冷卻的話再快也沒用", "fightSpeed", 0.5)
-    addNumber(DungeonTab, "傳送偏移 X", "預設 0", "tpX", -500)
-    addNumber(DungeonTab, "傳送偏移 Y", "預設 12.4（在敵人頭上）", "tpY", -500)
-    addNumber(DungeonTab, "傳送偏移 Z", "預設 0", "tpZ", -500)
-    addNumber(DungeonTab, "血量低於幾 % 就退出副本（0 = 不啟用）", "預設 0", "exitHp", 0)
-
-    local function pickTarget(root)
-        local best, bestScore
-        for _, e in ipairs(aliveEnemies()) do
-            if (ignoreUntil[e] or 0) < tick() then
-                local cf = cframeOf(e)
-                if cf then
-                    local hum = e:FindFirstChildOfClass("Humanoid")
-                    local score
-                    if T.dungeonPriority == "先打王（血最多）" and hum then
-                        score = -hum.MaxHealth
-                    elseif T.dungeonPriority == "先打血最少" and hum then
-                        score = hum.Health
-                    else
-                        score = (cf.Position - root.Position).Magnitude
+    local function scanGc()
+        if not getgc then return nil end
+        local ok, list = pcall(getgc, true)
+        if not ok or type(list) ~= "table" then return nil end
+        local best, bestGood = nil, 0
+        for _, t in ipairs(list) do
+            if type(t) == "table" then
+                local good, total = 0, 0
+                for _, v in next, t do
+                    total += 1
+                    if type(v) == "table" then
+                        local nm, rr = rawget(v, "name"), rawget(v, "rarity")
+                        if type(nm) == "string" and type(rr) == "string" then
+                            good += 1
+                        end
                     end
-                    if not bestScore or score < bestScore then
-                        best, bestScore = e, score
-                    end
+                    if total > 4000 then break end
+                end
+                if good >= 5 and good >= total * 0.8 and good > bestGood then
+                    best, bestGood = t, good
                 end
             end
         end
         return best
     end
 
-    -- 每一幀執行：換目標、鎖在目標頭上、依速度送出攻擊
-    RunService.Heartbeat:Connect(function(dt)
-        if not S.dungeonFarm then
-            if farm.target then
-                fire("SetTarget", nil)
-                farm.target = nil
+    local function currentInv(force)
+        hookInventoryEvent()
+        if invSource == "伺服器" and not force then
+            return inv
+        end
+        if force or invSource ~= "伺服器" then
+            if force or tick() - gcAt > 2 then
+                gcAt = tick()
+                local t = scanGc()
+                if t and (not inv or invSource ~= "伺服器" or countKeys(t) >= countKeys(inv)) then
+                    inv = t
+                    invSource = "記憶體"
+                end
             end
-            farm.hover = nil
-            farm.acc = 0
+        end
+        return inv
+    end
+
+    -- ===== 設定 =====
+    local iNames = EquipTab:CreateInput({
+        Name = "要合成的裝備名稱（用逗號分開，輸入 全部 代表所有）",
+        PlaceholderText = "例如 GoldenClover, Dagger（先按下面的按鈕看背包有哪些）",
+        Callback = function(text)
+            T.equipNames = tostring(text or "")
+            notify("已設定", "裝備 = " .. T.equipNames)
+        end,
+    })
+    regText("equipNames", iNames, function() return T.equipNames end, function(v) T.equipNames = v end)
+
+    local dTarget = EquipTab:CreateDropdown({
+        Name = "合成到哪個稀有度（低於這個的才會被合成）",
+        Options = {"Rare", "Epic", "Legendary", "Mythic", "Secret"},
+        CurrentOption = {T.equipTarget},
+        Callback = function(opt)
+            T.equipTarget = type(opt) == "table" and opt[1] or opt
+        end,
+    })
+    regDropdown("equipTarget", dTarget, function() return T.equipTarget end, function(v) T.equipTarget = v end)
+
+    addNumber(EquipTab, "每一輪送出幾組（3 件一組）", "預設 3", "equipBatch", 1)
+    addNumber(EquipTab, "每一輪間隔（秒）", "預設 0.6", "equipDelay", 0.2)
+
+    EquipTab:CreateButton({
+        Name = "讀取背包（複製各裝備的數量）",
+        Callback = function()
+            local t = currentInv(true)
+            if not t then
+                notify("讀不到背包", "先手動開一次「裝備」或合成一件，讓遊戲傳一次背包再試", 8)
+                return
+            end
+            local count, total = {}, 0
+            for _, info in pairs(t) do
+                if type(info) == "table" and type(info.name) == "string" then
+                    total += 1
+                    local key = info.name .. "｜" .. tostring(info.rarity)
+                    local c = count[key] or {n = 0, worn = 0}
+                    c.n += 1
+                    if info.equipped then c.worn += 1 end
+                    count[key] = c
+                end
+            end
+            local lines = {}
+            for k, c in pairs(count) do
+                table.insert(lines, string.format("%s ×%d（穿著 %d）", k, c.n, c.worn))
+            end
+            table.sort(lines)
+            local text = table.concat(lines, "\n")
+            if setclipboard then pcall(setclipboard, text) end
+            notify("背包", string.format("共 %d 件（來源：%s），名單已複製", total, invSource), 6)
+        end,
+    })
+
+    -- ===== 合成 =====
+    local function parseWanted()
+        local text = T.equipNames or ""
+        if text:find("全部") or text:lower():find("all") then
+            return nil
+        end
+        local set, any = {}, false
+        for piece in text:gmatch("[^,，、;；\n]+") do
+            local k = norm(piece)
+            if k ~= "" then
+                set[k] = true
+                any = true
+            end
+        end
+        return any and set or nil
+    end
+
+    local warnedRarity = {}
+    -- 找出這一輪可以合成的組合：先合低稀有度，每組是同名、同稀有度、沒穿著的 3 件
+    local function planMerges(t, wanted, targetRank, pending, failed, maxGroups)
+        local groups = {}
+        for id, info in pairs(t) do
+            if type(info) == "table" and type(info.name) == "string" and type(info.rarity) == "string" then
+                local sid = tostring(id)
+                local r = RANK[info.rarity:lower()]
+                if not r then
+                    if not warnedRarity[info.rarity] then
+                        warnedRarity[info.rarity] = true
+                        blog("不認識的稀有度：" .. info.rarity .. "（已略過）")
+                    end
+                elseif r < targetRank
+                    and not info.equipped and not info.locked and not info.favorite
+                    and not pending[sid] and (failed[sid] or 0) < 2
+                    and (wanted == nil or wanted[norm(info.name)]) then
+                    groups[r] = groups[r] or {}
+                    groups[r][info.name] = groups[r][info.name] or {}
+                    table.insert(groups[r][info.name], sid)
+                end
+            end
+        end
+        local plan = {}
+        for r = 1, targetRank - 1 do
+            if groups[r] then
+                for name, ids in pairs(groups[r]) do
+                    table.sort(ids, function(a, b)
+                        return (tonumber(a) or 0) < (tonumber(b) or 0)
+                    end)
+                    while #ids >= 3 and #plan < maxGroups do
+                        table.insert(plan, {
+                            name = name,
+                            rank = r,
+                            ids = {table.remove(ids, 1), table.remove(ids, 1), table.remove(ids, 1)},
+                        })
+                    end
+                end
+            end
+            if #plan >= maxGroups then break end
+        end
+        return plan
+    end
+
+    local function runMerge()
+        if (T.equipNames or "") == "" then
+            notify("還沒選裝備", "請先輸入裝備名稱（或輸入 全部）", 6)
             return
         end
-        local root = getRoot()
-        if not root then return end
-
-        local t = farm.target
-        if t then
-            local h = t:FindFirstChildOfClass("Humanoid")
-            if (not t.Parent) or (h and h.Health <= 0) then
-                kills += 1
-                lastKill = tick() - farm.startT
-                totalKill += lastKill
-                farm.target = nil
-                t = nil
-            elseif tick() - farm.startT > 25 then
-                ignoreUntil[t] = tick() + 10   -- 25 秒打不死就先跳過它
-                fire("SetTarget", nil)
-                farm.target = nil
-                t = nil
-            end
-        end
-        if not t then
-            local best = pickTarget(root)
-            if best then
-                farm.target = best
-                farm.startT = tick()
-                farm.acc = 0
-                farm.noEnemySince = nil
-                fire("SetTarget", best)
-                t = best
-            elseif not farm.noEnemySince then
-                farm.noEnemySince = tick()
-            end
-        end
-
-        if t then
-            local cf = cframeOf(t)
-            if cf then
-                local pos = cf.Position + Vector3.new(N.tpX, N.tpY, N.tpZ)
-                root.CFrame = CFrame.new(pos)
-                root.AssemblyLinearVelocity = Vector3.zero
-                farm.hover = pos
-            end
-            farm.acc += dt * math.clamp(N.fightSpeed, 0.5, 60)
-            local n = 0
-            while farm.acc >= 1 and n < 6 do
-                fire("PunchEvent", t)
-                farm.acc -= 1
-                n += 1
-            end
-            if farm.acc > 6 then farm.acc = 0 end
-        elseif farm.hover then
-            -- 暫時沒有敵人：停在原地的空中，不要掉下去
-            root.CFrame = CFrame.new(farm.hover)
-            root.AssemblyLinearVelocity = Vector3.zero
-        end
-    end)
-
-    -- 每 0.5 秒：血量保護、統計顯示、完成後重新開始
-    every("dungeonFarm", function() return 0.5 end, function()
-        local hum = getHumanoid()
-        if N.exitHp > 0 and hum and hum.MaxHealth > 0
-            and hum.Health / hum.MaxHealth * 100 < N.exitHp then
-            exitDungeon()
-            farm.hover = nil
-            status = "血量過低，已退出副本"
-            task.wait(3)
+        local wanted = parseWanted()
+        local targetRank = RANK[(T.equipTarget or "Mythic"):lower()] or 5
+        if not currentInv(true) then
+            notify("讀不到背包", "先手動開一次「裝備」或合成一件，讓遊戲傳一次背包再試", 8)
             return
         end
+        blog("合成裝備開始：背包來源 " .. invSource .. "，目標 " .. LADDER[targetRank])
 
-        local avg = kills > 0 and totalKill / kills or 0
-        status = string.format("副本：已打死 %d 隻｜上一隻 %.1f 秒｜平均 %.1f 秒｜完成 %d 次%s",
-            kills, lastKill, avg, runs, farm.target and ("｜攻擊 " .. farm.target.Name) or "｜等待敵人")
+        local pending, failed = {}, {}
+        local fired, idle = 0, 0
+        local batch = math.clamp(math.floor(N.equipBatch), 1, 20)
 
-        if not farm.target then
-            local fin = dig(getPg(), "DungeonFinishUI")
-            if S.dungeonRestart and fin and fin.Enabled then
-                runs += 1
-                farm.hover = nil
-                exitDungeon()
-                task.wait(2.5)
-                startDungeon()
-                task.wait(3)
-                farm.noEnemySince = nil
-            elseif farm.noEnemySince and tick() - farm.noEnemySince > 5 then
-                farm.hover = nil   -- 5 秒都沒有敵人，不要一直掛在空中
+        while S.autoEquipMerge and fired < 600 do
+            local t = currentInv(false)
+            if not t then break end
+
+            -- 已經從背包消失 = 伺服器處理完了；太久沒消失 = 這組可能失敗
+            local now = tick()
+            for sid, at in pairs(pending) do
+                if t[sid] == nil and t[tonumber(sid)] == nil then
+                    pending[sid] = nil
+                elseif now - at > 6 then
+                    pending[sid] = nil
+                    failed[sid] = (failed[sid] or 0) + 1
+                end
+            end
+
+            local plan = planMerges(t, wanted, targetRank, pending, failed, batch)
+            if #plan > 0 then
+                idle = 0
+                for _, m in ipairs(plan) do
+                    local ok, err = fire("PlayerMergeEquipment", m.ids)
+                    if not ok then
+                        status = "送出失敗：" .. tostring(err)
+                        blog(status)
+                        return
+                    end
+                    for _, sid in ipairs(m.ids) do
+                        pending[sid] = tick()
+                    end
+                    fired += 1
+                    status = string.format("合成 %s（%s → %s）第 %d 組", m.name, LADDER[m.rank], LADDER[m.rank + 1], fired)
+                    task.wait(0.15)
+                end
+                task.wait(math.max(N.equipDelay, 0.2))
+            elseif next(pending) then
+                -- 還在等伺服器更新背包（合成出來的新裝備可能又能繼續合）
+                idle += 1
+                if idle > 24 then break end
+                task.wait(0.5)
+            else
+                break
             end
         end
-    end)
+        status = string.format("裝備合成結束（共送出 %d 組）", fired)
+        blog(status)
+        notify("合成裝備", status, 5)
+    end
+
+    local merging = false
+    local tEq
+    tEq = EquipTab:CreateToggle({
+        Name = "自動合成裝備（會消耗裝備，已穿著的不會動）",
+        CurrentValue = false,
+        Callback = function(v)
+            S.autoEquipMerge = v
+            if not v or merging then return end
+            merging = true
+            task.spawn(function()
+                local ok, err = pcall(runMerge)
+                if not ok then
+                    status = "裝備合成出錯：" .. tostring(err)
+                    blog(status)
+                end
+                merging = false
+                S.autoEquipMerge = false
+                pcall(function() tEq:Set(false) end)
+            end)
+        end,
+    })
 end
 
 -- ====================================================================
