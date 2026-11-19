@@ -412,6 +412,38 @@ local function saveConfig()
     end
 end
 
+local deleteConfirmUntil = 0
+local function deleteConfig()
+    if not (isfile and delfile) then
+        notify("無法刪除", "執行器不支援檔案刪除（需要 isfile、delfile）", 5)
+        return
+    end
+    local ok, exists = pcall(isfile, CONFIG_FILE)
+    if not ok then
+        notify("檢查失敗", tostring(exists), 5)
+        return
+    end
+    if not exists then
+        deleteConfirmUntil = 0
+        notify("沒有設定檔", "目前沒有已儲存的設定", 4)
+        return
+    end
+    local now = os.clock()
+    if now > deleteConfirmUntil then
+        deleteConfirmUntil = now + 8
+        notify("確認刪除", "8 秒內再按一次「刪除設定」才會永久刪除存檔；目前功能不受影響", 7)
+        return
+    end
+    deleteConfirmUntil = 0
+    local success, err = pcall(delfile, CONFIG_FILE)
+    local checkOk, stillExists = pcall(isfile, CONFIG_FILE)
+    if success and checkOk and not stillExists then
+        notify("已刪除設定", "已移除儲存檔；目前正在執行的設定不會重設", 5)
+    else
+        notify("刪除失敗", tostring(err or (checkOk and "檔案仍存在" or stillExists)), 5)
+    end
+end
+
 local function loadConfig(quiet)
     if not (isfile and readfile) or not isfile(CONFIG_FILE) then
         if not quiet then
@@ -4275,6 +4307,13 @@ SetTab:CreateButton({
     Name = "載入設定",
     Callback = function()
         loadConfig(false)
+    end,
+})
+
+SetTab:CreateButton({
+    Name = "刪除設定（連按兩次確認）",
+    Callback = function()
+        deleteConfig()
     end,
 })
 

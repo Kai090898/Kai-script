@@ -143,6 +143,38 @@ local function saveConfig()
     notify(ok and "已儲存" or "儲存失敗", ok and "拳擊模擬器 AFK 的設定已存檔" or tostring(err))
 end
 
+local deleteConfirmUntil = 0
+local function deleteConfig()
+    if not (isfile and delfile) then
+        notify("無法刪除", "執行器不支援檔案刪除（需要 isfile、delfile）", 5)
+        return
+    end
+    local ok, exists = pcall(isfile, CONFIG_FILE)
+    if not ok then
+        notify("檢查失敗", tostring(exists), 5)
+        return
+    end
+    if not exists then
+        deleteConfirmUntil = 0
+        notify("沒有設定檔", "目前沒有已儲存的設定", 4)
+        return
+    end
+    local now = os.clock()
+    if now > deleteConfirmUntil then
+        deleteConfirmUntil = now + 8
+        notify("確認刪除", "8 秒內再按一次「刪除設定」才會永久刪除存檔；目前功能不受影響", 7)
+        return
+    end
+    deleteConfirmUntil = 0
+    local success, err = pcall(delfile, CONFIG_FILE)
+    local checkOk, stillExists = pcall(isfile, CONFIG_FILE)
+    if success and checkOk and not stillExists then
+        notify("已刪除設定", "已移除儲存檔；目前正在執行的設定不會重設", 5)
+    else
+        notify("刪除失敗", tostring(err or (checkOk and "檔案仍存在" or stillExists)), 5)
+    end
+end
+
 local function loadConfig(quiet)
     if not (isfile and readfile) or not isfile(CONFIG_FILE) then
         if not quiet then notify("沒有存檔", "請先按「儲存設定」") end
@@ -178,7 +210,7 @@ local S = {}        -- 各功能的開關（只在這個執行期間有效）
 local N = {         -- 數值設定
     clickSpeed = 1.2,
     giftCount = 12,
-    hatchDelay = 1.2,
+    hatchDelay = 0.1,
     cleanAge = 3,
     shopDelay = 5,
     mergeAmount = 5,
@@ -437,6 +469,15 @@ end
 -- ====================================================================
 EggTab:CreateSection("孵蛋")
 local hatchCount = 0
+local fastHatch = true
+local fastHide = true
+local hatchStats = {attempts = 0, sent = 0, failed = 0, button = 0, start = os.clock()}
+local function hatchStatsText()
+    local elapsed = math.max(os.clock() - hatchStats.start, 1)
+    return string.format("嘗試 %d | 事件送出 %d | 失敗 %d | 按鈕 %d | %.1f 次/分鐘",
+        hatchStats.attempts, hatchStats.sent, hatchStats.failed, hatchStats.button,
+        hatchStats.attempts * 60 / elapsed)
+end
 do
     -- 蛋的名稱：來自 workspace.EggVendors 底下的名字（探測時看過 Forest2、HalloweenEgg）
     local function listEggs()
@@ -491,7 +532,31 @@ do
     regDropdown("hatchMode", dMode, function() return T.hatchMode end, function(v) T.hatchMode = v end)
 
     addToggle(EggTab, "自動孵蛋（要站在蛋旁邊）", "hatch")
-    addNumber(EggTab, "孵蛋間隔（秒）", "預設 1.2", "hatchDelay", 0.3)
+    addNumber(EggTab, "孵蛋間隔（秒）", "預設 0.1", "hatchDelay", 0.1)
+    EggTab:CreateSection("極速孵蛋（0.1 秒）")
+    EggTab:CreateToggle({
+        Name = "快速事件孵蛋（跳過尋找按鈕）",
+        CurrentValue = true,
+        Callback = function(v) fastHatch = v end,
+    })
+    EggTab:CreateToggle({
+        Name = "快速隱藏開蛋動畫介面",
+        CurrentValue = true,
+        Callback = function(v) fastHide = v end,
+    })
+    EggTab:CreateButton({
+        Name = "查看孵蛋速度統計",
+        Callback = function()
+            notify("孵蛋統計（送出嘗試，不代表實際成功）", hatchStatsText(), 8)
+        end,
+    })
+    EggTab:CreateButton({
+        Name = "重設孵蛋統計",
+        Callback = function()
+            hatchStats = {attempts = 0, sent = 0, failed = 0, button = 0, start = os.clock()}
+            notify("孵蛋統計", "已重設", 3)
+        end,
+    })
     addToggle(EggTab, "孵蛋前先傳送到蛋旁邊", "eggTeleport")
 
     EggTab:CreateButton({
@@ -523,20 +588,28 @@ do
             end
         end
         local used = false
-        if T.hatchMode ~= "事件" then
+        if not fastHatch and T.hatchMode ~= "事件" then
             local btn = findOpenButton(T.hatchMode == "Open3" and "Open3" or "Open1")
             if btn then
                 click(btn)
                 used = true
+                hatchStats.button += 1
             end
         end
         if not used then
-            fire("PlayerPressedKeyOnEgg", egg)
+            local ok, err = fire("PlayerPressedKeyOnEgg", egg)
+            if ok then
+                hatchStats.sent += 1
+            else
+                hatchStats.failed += 1
+                blog("孵蛋事件送出失敗：" .. tostring(err))
+            end
         end
+        hatchStats.attempts += 1
         hatchCount += 1
-        status = string.format("已孵蛋 %d 次（%s，%s）", hatchCount, egg, used and "按鈕" or "事件")
-        if S.instantOpen then
-            task.wait(0.15)
+        status = string.format("已嘗試孵蛋 %d 次（%s，%s）", hatchCount, egg, used and "按鈕" or "事件")
+        if S.instantOpen or fastHide then
+            if not fastHide then task.wait(0.15) end
             for _, n in ipairs({"PetOpenUI", "PetOpenUIOLD"}) do
                 local g = dig(getPg(), n)
                 if g then g.Enabled = false end
@@ -1243,6 +1316,7 @@ end
 SetTab:CreateSection("設定檔")
 SetTab:CreateButton({Name = "儲存設定", Callback = function() saveConfig() end})
 SetTab:CreateButton({Name = "載入設定", Callback = function() loadConfig(false) end})
+SetTab:CreateButton({Name = "刪除設定（連按兩次確認）", Callback = function() deleteConfig() end})
 SetTab:CreateButton({
     Name = "隱藏視窗（會出現可拖曳的小按鈕）",
     Callback = function() UI:SetVisibility(false) end,
