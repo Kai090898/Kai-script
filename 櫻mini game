@@ -1412,6 +1412,23 @@ end
 --  不會按任何 Robux 解鎖或解鎖田地的按鈕
 -- ====================================================================
 local AfkTab = FarmTab
+AfkTab:CreateSection("獨立農場全自動掛機（跨服續掛）")
+AfkTab:CreateButton({
+    Name = "開啟農場全自動掛機（20 秒除蟲／跨服續掛）",
+    Callback = function()
+        local ok, err = pcall(function()
+            local scriptText = game:HttpGet("https://raw.githubusercontent.com/Kai090898/Kai-script/main/%E6%AB%BB%E8%BE%B2%E5%A0%B4%E8%87%AA%E5%8B%95%E6%8E%9B%E6%A9%9F.txt")
+            local run, compileErr = loadstring(scriptText)
+            assert(run, compileErr)
+            run()
+        end)
+        if not ok then
+            notify("農場掛機載入失敗", tostring(err), 6)
+        end
+    end,
+})
+-- 獨立版會建立自己的農場介面；請勿同時啟用下方舊版「自動小農場」。
+
 AfkTab:CreateSection("每日小農場")
 
 do

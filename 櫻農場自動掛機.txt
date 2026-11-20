@@ -1,0 +1,207 @@
+-- 櫻 mini game｜農場自動掛機 Rejoin V3 正式版（GitHub）
+-- 第一次執行會將本腳本寫入執行器本地檔案，之後每次遊戲內傳送會排隊重新執行。
+local source = [======[
+-- 櫻 mini game｜農場全自動掛機（獨立農場掛機版）
+-- 僅在執行器支援 queue_on_teleport / queueonteleport 時可跨伺服器自動重載。
+local env = (getgenv and getgenv()) or _G
+if env.KaiSakuraFarmTest and env.KaiSakuraFarmTest.alive and env.KaiSakuraFarmTest.alive() then
+    env.KaiSakuraFarmTest.show()
+    return
+end
+local UI = loadstring(game:HttpGet('https://raw.githubusercontent.com/Kai090898/Kai-script/main/%E5%8D%A1%E4%BE%9Dui'))()
+local Players = game:GetService('Players')
+local HttpService = game:GetService('HttpService')
+local GuiService = game:GetService('GuiService')
+local VIM = game:GetService('VirtualInputManager')
+local player = Players.LocalPlayer
+local CONFIG = 'KaiScript_SakuraFarmAFK_Test.json'
+local SEEDS = {'青菜','蘿蔔','番茄','玉米','向日葵'}
+local INTERVAL = 20
+local enabled, seedName, alive = false, '玉米', true
+local status = '待命'
+local function notify(title, msg, duration)
+    pcall(function() UI:Notify({Title=title, Content=msg, Duration=duration or 4}) end)
+end
+local function readSettings()
+    if not (isfile and readfile) then return end
+    local ok, value = pcall(function()
+        if isfile(CONFIG) then return HttpService:JSONDecode(readfile(CONFIG)) end
+    end)
+    if ok and type(value)=='table' then return value end
+end
+local function saveSettings()
+    if not writefile then notify('無法記憶設定','執行器不支援 writefile'); return end
+    local ok, err = pcall(function()
+        writefile(CONFIG, HttpService:JSONEncode({seed=seedName, enabled=enabled}))
+    end)
+    if not ok then notify('儲存失敗',tostring(err)) end
+end
+local saved = readSettings()
+if saved then
+    for _, s in ipairs(SEEDS) do if saved.seed==s then seedName=s end end
+    enabled = saved.enabled == true
+end
+local function findButton(root, pred)
+    for _, v in ipairs(root:GetDescendants()) do
+        if v:IsA('TextButton') and pred(v.Text or '') then return v end
+    end
+end
+local function has(text, sub) return string.find(text,sub,1,true) ~= nil end
+local function press(btn)
+    if not btn then return false end
+    if getconnections then
+        for _, signal in ipairs({btn.Activated,btn.MouseButton1Click}) do
+            local ok, connections = pcall(getconnections,signal)
+            if ok and connections and #connections>0 then
+                for _, c in ipairs(connections) do pcall(function() c:Fire() end) end
+                return true
+            end
+        end
+    end
+    local gui = btn:FindFirstAncestorWhichIsA('ScreenGui')
+    local inset = Vector2.zero
+    if gui and not gui.IgnoreGuiInset then inset=GuiService:GetGuiInset() end
+    local pos = btn.AbsolutePosition + btn.AbsoluteSize/2 + inset
+    return pcall(function()
+        VIM:SendMouseButtonEvent(pos.X,pos.Y,0,true,game,0)
+        VIM:SendMouseButtonEvent(pos.X,pos.Y,0,false,game,0)
+    end)
+end
+local function cycle()
+    -- V3: Rejoin 時 FarmGui 可能尚未建立；必須先按 FarmHud.OpenFarm
+    -- 讓遊戲初始化農場，再重新搜尋 GUI，不能先要求 FarmGui 存在。
+    local pg=player:FindFirstChild('PlayerGui') or player:WaitForChild('PlayerGui',10)
+    if not pg then status='等待 PlayerGui'; return false end
+    local function locateFarm()
+        local g=pg:FindFirstChild('FarmGui')
+        local m=g and (g:FindFirstChild('Main') or g:FindFirstChildOfClass('Frame'))
+        if m and not m:IsA('GuiObject') then m=g:FindFirstChildOfClass('Frame') end
+        return g,m
+    end
+    local gui,main=locateFarm()
+    local openedByMe=false
+    if not main or not main.Visible then
+        local hud=pg:FindFirstChild('FarmHud') or pg:WaitForChild('FarmHud',8)
+        local openBtn=hud and (hud:FindFirstChild('OpenFarm',true) or
+            findButton(hud,function(t) return has(t,'農場') end))
+        if not openBtn then status='等待農場按鈕 OpenFarm'; return false end
+        if not press(openBtn) then status='開啟農場失敗，稍後重試'; return false end
+        openedByMe=true
+        local deadline=os.clock()+8
+        repeat
+            task.wait(0.2)
+            gui,main=locateFarm()
+        until (main and main.Visible) or not alive or not enabled or os.clock()>=deadline
+        if not main or not main.Visible then
+            status='等待農場初始化，稍後自動重試'
+            return false
+        end
+        task.wait(0.5)
+    end
+    local did={}
+    local function action(label,pred,delay)
+        local btn=findButton(gui,pred)
+        if btn and press(btn) then
+            table.insert(did,label)
+            task.wait(delay or 0.4)
+            return true
+        end
+        return false
+    end
+    -- 除蟲與其他工作每 20 秒同一輪檢查；除蟲需要花費遊戲內花朵。
+    action('除蟲',function(t) return has(t,'🐛') and not has(t,'沒蟲') end)
+    action('日照',function(t) return has(t,'☀') and not has(t,'已用') end)
+    action('收成',function(t) return has(t,'全部收成') end,0.5)
+    local seed=findButton(gui,function(t) return has(t,seedName) and has(t,'🌸') end)
+    local plant=findButton(gui,function(t) return has(t,'全部種植') end)
+    if seed and plant and press(seed) then
+        task.wait(0.4)
+        if press(plant) then table.insert(did,'種植'..seedName) end
+        task.wait(0.5)
+    end
+    action('澆水',function(t) return has(t,'全部澆水') end)
+    status=(#did>0 and table.concat(did,'、') or '沒有需要操作的項目')
+    if openedByMe then
+        local x=findButton(gui,function(t) return t=='X' end)
+        if x then press(x) end
+    end
+    return true
+end
+local Window=UI:CreateWindow({Name='櫻 mini game｜農場自動掛機（測試）',GuiName='KaiUI_SakuraFarmTest',FloatText='農',DisplayOrder=103,Theme='black'})
+local Tab=Window:CreateTab('農場掛機')
+Tab:CreateSection('只要選植物，再開始掛機')
+local seedDrop=Tab:CreateDropdown({Name='種植植物',Options=SEEDS,CurrentOption={seedName},Callback=function(v)
+    local chosen=type(v)=='table' and v[1] or v
+    for _, s in ipairs(SEEDS) do if chosen==s then seedName=s; saveSettings(); break end end
+end})
+local toggle=Tab:CreateToggle({Name='開始／停止全自動農場',CurrentValue=enabled,Callback=function(v)
+    enabled=v==true
+    status=enabled and '啟動中' or '已停止'
+    saveSettings()
+    notify('農場掛機',enabled and ('已開始，種植 '..seedName) or '已停止',3)
+end})
+Tab:CreateSection('自動收成／種植／澆水／除蟲／日照；每 20 秒檢查')
+local statusBtn=Tab:CreateButton({Name='農場狀態：'..status,Callback=function() notify('農場狀態',status,5) end})
+Tab:CreateButton({Name='立即檢查一次',Callback=function()
+    if not enabled then notify('請先啟動','先打開全自動農場'); return end
+    task.spawn(function() local ok,err=pcall(cycle); if not ok then status='錯誤：'..tostring(err) end end)
+end})
+local function queueForTeleport()
+    local queue = queue_on_teleport or queueonteleport or (syn and syn.queue_on_teleport)
+    if type(queue) ~= 'function' then return false, '執行器不支援 queue_on_teleport' end
+    if not (isfile and readfile and loadstring) then
+        return false, '執行器不支援讀取本地重載腳本'
+    end
+    local path = 'KaiScript_SakuraFarmAFK_Rejoin_V3.lua'
+    if not isfile(path) then
+        return false, '找不到重載檔案，請重新執行完整 TXT 載入器'
+    end
+    local code = [[
+        repeat task.wait(0.5) until game:IsLoaded() and game:GetService('Players').LocalPlayer
+        local path = 'KaiScript_SakuraFarmAFK_Rejoin_V3.lua'
+        if isfile and readfile and isfile(path) then
+            local fn, err = loadstring(readfile(path))
+            if fn then fn() else warn('[Sakura Farm] 重載失敗：'..tostring(err)) end
+        else
+            warn('[Sakura Farm] 無法讀取重載檔案')
+        end
+    ]]
+    local ok, err = pcall(queue, code)
+    return ok, ok and '已排入下次傳送自動重載' or tostring(err)
+end
+local supported, queueMessage = queueForTeleport()
+Tab:CreateButton({Name='跨服自動載入狀態',Callback=function()
+    notify('傳送續掛',queueMessage,8)
+end})
+task.spawn(function()
+    while alive do
+        if enabled then
+            local ok,result=pcall(cycle)
+            if not ok then status='錯誤：'..tostring(result); warn('[Sakura Farm AFK] '..status) end
+            local waitSeconds=(ok and result==false) and 2 or INTERVAL
+            local t=0
+            while alive and enabled and t<waitSeconds do task.wait(0.5); t+=0.5 end
+        else task.wait(0.5) end
+    end
+end)
+task.spawn(function()
+    while alive do
+        pcall(function() statusBtn:SetName('農場狀態：'..status) end)
+        task.wait(1)
+    end
+end)
+UI:OnClose(function() alive=false end)
+env.KaiSakuraFarmTest={alive=function() return alive end,show=function() UI:SetVisibility(true) end}
+notify('櫻農場測試版','已載入；選植物後開啟掛機。除蟲檢查固定 20 秒',6)
+
+]======]
+local path = 'KaiScript_SakuraFarmAFK_Rejoin_V3.lua'
+if type(writefile) ~= 'function' then
+    warn('[Sakura Farm] 執行器不支援 writefile，無法建立跨服重載檔')
+else
+    local ok, err = pcall(writefile, path, source)
+    if not ok then warn('[Sakura Farm] 寫入重載檔失敗：'..tostring(err)) end
+end
+local fn, err = loadstring(source)
+assert(fn, '農場腳本編譯失敗：'..tostring(err))
+fn()
