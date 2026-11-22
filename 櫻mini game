@@ -1435,7 +1435,7 @@ do
     local VIM = game:GetService("VirtualInputManager")
     local GuiService = game:GetService("GuiService")
 
-    local SEEDS = {"青菜", "蘿蔔", "番茄", "玉米", "向日葵"}
+    local SEEDS = {"無", "青菜", "蘿蔔", "番茄", "玉米", "向日葵"}
 
     local farmOn = false
     local harvestOn, plantOn, waterOn, pestOn, sunOn = true, false, true, true, true
@@ -1578,7 +1578,7 @@ do
         end
 
         -- 重新種植：先選種子，再按全部種植（會花🌸買種子）
-        if plantOn then
+        if plantOn and seedName ~= "無" then
             local seed = findButton(gui, function(t) return has(t, seedName) and has(t, "🌸") end)
             local plantBtn = findButton(gui, function(t) return has(t, "全部種植") end)
             if seed and plantBtn then
