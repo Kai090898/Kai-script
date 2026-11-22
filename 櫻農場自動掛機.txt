@@ -15,7 +15,7 @@ local GuiService = game:GetService('GuiService')
 local VIM = game:GetService('VirtualInputManager')
 local player = Players.LocalPlayer
 local CONFIG = 'KaiScript_SakuraFarmAFK_Test.json'
-local SEEDS = {'青菜','蘿蔔','番茄','玉米','向日葵'}
+local SEEDS = {'無','青菜','蘿蔔','番茄','玉米','向日葵'}
 local INTERVAL = 20
 local enabled, seedName, alive = false, '玉米', true
 local status = '待命'
@@ -112,12 +112,14 @@ local function cycle()
     action('除蟲',function(t) return has(t,'🐛') and not has(t,'沒蟲') end)
     action('日照',function(t) return has(t,'☀') and not has(t,'已用') end)
     action('收成',function(t) return has(t,'全部收成') end,0.5)
-    local seed=findButton(gui,function(t) return has(t,seedName) and has(t,'🌸') end)
-    local plant=findButton(gui,function(t) return has(t,'全部種植') end)
-    if seed and plant and press(seed) then
-        task.wait(0.4)
-        if press(plant) then table.insert(did,'種植'..seedName) end
-        task.wait(0.5)
+    if seedName~='無' then
+        local seed=findButton(gui,function(t) return has(t,seedName) and has(t,'🌸') end)
+        local plant=findButton(gui,function(t) return has(t,'全部種植') end)
+        if seed and plant and press(seed) then
+            task.wait(0.4)
+            if press(plant) then table.insert(did,'種植'..seedName) end
+            task.wait(0.5)
+        end
     end
     action('澆水',function(t) return has(t,'全部澆水') end)
     status=(#did>0 and table.concat(did,'、') or '沒有需要操作的項目')
