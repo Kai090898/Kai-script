@@ -1,0 +1,53 @@
+-- 拳擊每日 UGC 精準感應器 V2：只讀 GUI，絕不觸發領取
+local P=game:GetService("Players").LocalPlayer
+local pg=P:WaitForChild("PlayerGui")
+local env=(getgenv and getgenv()) or _G
+if env.KaiUGCProbeStop then pcall(env.KaiUGCProbeStop) end
+local g=Instance.new("ScreenGui");g.Name="KaiUGCProbeV2";g.ResetOnSpawn=false;g.DisplayOrder=999;g.Parent=pg
+local f=Instance.new("Frame");f.Size=UDim2.fromOffset(480,340);f.Position=UDim2.new(.5,-240,.5,-170);f.BackgroundColor3=Color3.fromRGB(26,32,45);f.Parent=g
+local txt=Instance.new("TextBox");txt.MultiLine=true;txt.ClearTextOnFocus=false;txt.TextEditable=false;txt.TextXAlignment=Enum.TextXAlignment.Left;txt.TextYAlignment=Enum.TextYAlignment.Top;txt.Font=Enum.Font.Code;txt.TextSize=13;txt.TextColor3=Color3.new(1,1,1);txt.BackgroundTransparency=1;txt.Position=UDim2.fromOffset(10,50);txt.Size=UDim2.new(1,-20,1,-60);txt.Text="請打開 UGC 頁面後按感應";txt.Parent=f
+local result=""
+local function b(name,x,w,fn)
+ local o=Instance.new("TextButton");o.Position=UDim2.fromOffset(x,9);o.Size=UDim2.fromOffset(w,32);o.Text=name;o.TextSize=14;o.TextColor3=Color3.new(1,1,1);o.BackgroundColor3=Color3.fromRGB(55,100,150);o.Parent=f;o.MouseButton1Click:Connect(fn)
+end
+local function visible(o)
+ while o and o~=pg do
+  if o:IsA("GuiObject") and not o.Visible then return false end
+  if o:IsA("ScreenGui") and not o.Enabled then return false end
+  o=o.Parent
+ end
+ return true
+end
+local function scan()
+ local out={"===== UGC 精準感應 V2 =====","時間 "..os.date("%Y-%m-%d %H:%M:%S")}
+ local found=0
+ for _,rootName in ipairs({"SummerQuest","UniqueQuest","UniqueQuest2","UGCTasks","UGCNextBoss2","UGCVisitsPlaytimeQuest","AxolotlQuest"}) do
+  local root=pg:FindFirstChild(rootName,true)
+  if root then
+   found+=1;table.insert(out,"\n[介面] "..root:GetFullName().." visible="..tostring(visible(root)))
+   local nodes={root}
+   for _,v in ipairs(root:GetDescendants()) do table.insert(nodes,v) end
+   for _,v in ipairs(nodes) do
+    if v:IsA("TextLabel") or v:IsA("TextButton") or v:IsA("TextBox") then
+     local t=v.Text:gsub("\n"," "):sub(1,160)
+     if t~="" then
+      local extras=""
+      if v:IsA("GuiButton") then extras=" active="..tostring(v.Active).." interactable="..tostring(v.Interactable) end
+      table.insert(out,v.Name.." = "..t.." | visible="..tostring(visible(v))..extras)
+     end
+    elseif v:IsA("ImageLabel") or v:IsA("ImageButton") then
+     if v.Name~="Stars" then table.insert(out,v.Name.." image="..tostring(v.Image).." | visible="..tostring(visible(v))) end
+    elseif v:IsA("NumberValue") or v:IsA("IntValue") or v:IsA("StringValue") or v:IsA("BoolValue") then
+     table.insert(out,v.Name.." ["..v.ClassName.."]="..tostring(v.Value))
+    end
+   end
+  end
+ end
+ if found==0 then table.insert(out,"未找到已知 UGC 介面") end
+ result=table.concat(out,"\n")
+ txt.Text=result
+end
+b("感應 UGC",10,130,scan)
+b("複製報告",148,130,function()if setclipboard then pcall(setclipboard,result) end end)
+b("關閉",286,184,function()g:Destroy()end)
+env.KaiUGCProbeStop=function()if g.Parent then g:Destroy()end end
