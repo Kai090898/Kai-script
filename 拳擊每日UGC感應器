@@ -1,0 +1,126 @@
+-- 拳擊模擬器｜每日 UGC UI 感應器 v1（只讀，不領取、不送 Remote）
+local Players = game:GetService("Players")
+local player = Players.LocalPlayer
+local pg = player:WaitForChild("PlayerGui")
+local env = (getgenv and getgenv()) or _G
+if env.KaiUGCProbeStop then pcall(env.KaiUGCProbeStop) end
+
+local running = true
+local report = "請先打開每日 UGC 頁面，再按「感應目前畫面」"
+local function relevant(s)
+    s = tostring(s or ""):lower()
+    return s:find("ugc",1,true) or s:find("daily",1,true)
+        or s:find("每日",1,true) or s:find("限量",1,true)
+        or s:find("庫存",1,true) or s:find("stock",1,true)
+        or s:find("任務",1,true) or s:find("claim",1,true)
+        or s:find("reward",1,true)
+end
+local gui = Instance.new("ScreenGui")
+gui.Name = "KaiDailyUGCProbe"
+gui.ResetOnSpawn = false
+gui.DisplayOrder = 999
+gui.Parent = pg
+local panel = Instance.new("Frame")
+panel.Name = "Panel"
+panel.Size = UDim2.fromOffset(440,320)
+panel.Position = UDim2.new(0.5,-220,0.5,-160)
+panel.BackgroundColor3 = Color3.fromRGB(24,29,40)
+panel.Parent = gui
+local function makeButton(name,x,w,callback)
+    local b=Instance.new("TextButton")
+    b.Size=UDim2.fromOffset(w,34)
+    b.Position=UDim2.fromOffset(x,10)
+    b.Text=name
+    b.TextSize=14
+    b.TextColor3=Color3.new(1,1,1)
+    b.BackgroundColor3=Color3.fromRGB(50,93,145)
+    b.Parent=panel
+    b.MouseButton1Click:Connect(callback)
+end
+local scroll=Instance.new("ScrollingFrame")
+scroll.Position=UDim2.fromOffset(10,53)
+scroll.Size=UDim2.new(1,-20,1,-63)
+scroll.BackgroundTransparency=1
+scroll.ScrollBarThickness=6
+scroll.CanvasSize=UDim2.fromOffset(0,260)
+scroll.Parent=panel
+local label=Instance.new("TextLabel")
+label.BackgroundTransparency=1
+label.Size=UDim2.new(1,-12,0,260)
+label.TextXAlignment=Enum.TextXAlignment.Left
+label.TextYAlignment=Enum.TextYAlignment.Top
+label.TextWrapped=false
+label.TextSize=13
+label.Font=Enum.Font.Code
+label.TextColor3=Color3.fromRGB(230,237,245)
+label.Text="打開每日 UGC 頁面後，按「感應目前畫面」"
+label.Parent=scroll
+local function display(t)
+    report=t
+    label.Text=t
+    local lines=0
+    for _ in t:gmatch("\n") do lines+=1 end
+    local h=math.max(260,(lines+2)*17)
+    label.Size=UDim2.new(1,-12,0,h)
+    scroll.CanvasSize=UDim2.fromOffset(0,h)
+end
+local function safeText(o)
+    if o:IsA("TextLabel") or o:IsA("TextButton") or o:IsA("TextBox") then
+        return o.Text
+    end
+    return ""
+end
+local function capture()
+    local roots={}
+    for _,g in ipairs(pg:GetChildren()) do
+        if g:IsA("ScreenGui") and g~=gui and g.Enabled then
+            for _,o in ipairs(g:GetDescendants()) do
+                if o:IsA("GuiObject") and o.Visible and (relevant(o.Name) or relevant(safeText(o))) then
+                    local p=o
+                    for _=1,4 do
+                        if not p.Parent or p.Parent==g then break end
+                        p=p.Parent
+                    end
+                    roots[p]=true
+                end
+            end
+        end
+    end
+    local out={"===== 每日 UGC 感應報告 =====","時間: "..os.date("%Y-%m-%d %H:%M:%S"),"只讀取目前 PlayerGui，不會領獎或操作遊戲"}
+    local count=0
+    for root in pairs(roots) do
+        table.insert(out,"\n[UI] "..root:GetFullName())
+        local nodes={root}
+        for _,o in ipairs(root:GetDescendants()) do table.insert(nodes,o) end
+        for _,o in ipairs(nodes) do
+            if o:IsA("GuiObject") and o.Visible then
+                local txt=safeText(o)
+                if txt~="" or o:IsA("ImageLabel") or o:IsA("ImageButton") then
+                    count+=1
+                    local line=o.ClassName.." | "..o.Name.." | "..txt:gsub("\n"," / "):sub(1,180)
+                    if o:IsA("ImageLabel") or o:IsA("ImageButton") then
+                        line=line.." | image="..tostring(o.Image)
+                    end
+                    table.insert(out,line)
+                    if count>=350 then table.insert(out,"（已達 350 筆上限）");break end
+                end
+            end
+        end
+        if count>=350 then break end
+    end
+    if count==0 then table.insert(out,"沒有找到相關可見 UI；請先打開每日 UGC 頁面再感應。") end
+    display(table.concat(out,"\n"))
+end
+makeButton("感應目前畫面",10,135,capture)
+makeButton("複製報告",153,120,function()
+    if setclipboard then
+        local ok=pcall(setclipboard,report)
+        if ok then display(report.."\n\n[已複製到剪貼簿]") end
+    else
+        display(report.."\n\n[無法複製：執行環境不支援 setclipboard]")
+    end
+end)
+makeButton("關閉",281,145,function() running=false;gui:Destroy() end)
+env.KaiUGCProbeStop=function()
+    if running then running=false;gui:Destroy() end
+end
