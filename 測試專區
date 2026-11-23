@@ -1,0 +1,4391 @@
+-- ====================================================================
+--  櫻 mini game AFK（獨立的第二個介面）
+--  左邊分頁：自動撿花 / 自動翻機器人 / 每日小農場 / 悠閒釣魚 / 熔岩攀爬 / 21 點 / 深淵地牢 / 設定
+--  移動方式：改用玩家螢幕上的搖桿移動（遊戲的移動由伺服器控制，直接叫角色走會被拉回原地）
+--  介面庫與主腳本共用同一個「卡依ui」，但會開成獨立的第二個視窗
+-- ====================================================================
+local env = (getgenv and getgenv()) or _G
+
+-- 已經開著的話，直接把視窗叫出來就好（不要重新建立，免得掛機狀態被重設）
+if env.KaiSakuraAFK and env.KaiSakuraAFK.alive() then
+    env.KaiSakuraAFK.show()
+    return
+end
+
+local UI = loadstring(game:HttpGet("https://raw.githubusercontent.com/Kai090898/Kai-script/refs/heads/main/%E5%8D%A1%E4%BE%9Dui"))()
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local HttpService = game:GetService("HttpService")
+local LocalPlayer = Players.LocalPlayer
+
+local function notify(title, content, duration)
+    UI:Notify({Title = title, Content = content, Duration = duration or 3})
+end
+
+local function getHumanoid()
+    local char = LocalPlayer.Character
+    return char and char:FindFirstChildOfClass("Humanoid")
+end
+
+local function getRoot()
+    local char = LocalPlayer.Character
+    return char and char:FindFirstChild("HumanoidRootPart")
+end
+
+-- 這個介面沒有英文切換，這兩個是給下面共用的程式用的
+local langItems = {}
+local useEnglish = false
+
+-- 掛機區與翻機器人之間互相呼叫用
+local FarmAPI = {}
+
+-- ===== 穿透（Noclip）：自動撿花啟動時會自動打開 =====
+local noclipOn = false
+local noclipParts = {}
+
+local function restoreNoclip()
+    for p in pairs(noclipParts) do
+        if p.Parent then
+            p.CanCollide = true
+        end
+    end
+    noclipParts = {}
+end
+
+RunService.Stepped:Connect(function()
+    if not noclipOn then
+        return
+    end
+    local char = LocalPlayer.Character
+    if not char then
+        return
+    end
+    for _, p in ipairs(char:GetDescendants()) do
+        if p:IsA("BasePart") and p.CanCollide then
+            noclipParts[p] = true
+            p.CanCollide = false
+        end
+    end
+end)
+
+-- 讓下面的程式可以用 tNoclip:Set(true/false)
+local tNoclip = {}
+function tNoclip:Set(v)
+    noclipOn = v and true or false
+    if not noclipOn then
+        restoreNoclip()
+    end
+end
+
+-- ===== 搖桿移動 =====
+-- 遊戲的移動是伺服器在控制，叫角色直接走（MoveTo）會被拉回原地，
+-- 所以改成「操作螢幕上的搖桿」：
+--   搖桿（模擬觸控）：在螢幕搖桿上模擬手指按住、推動
+--   搖桿（控制模組）：直接對遊戲的控制模組輸出搖桿的移動方向（模擬觸控沒反應時用）
+--   飄（飛行）：像主腳本的「飛行」一樣飄在地面上方移動（不會踩到傳送陣）
+--   直接走（舊方式）：原本的 MoveTo
+local GuiService = game:GetService("GuiService")
+local VIM = game:GetService("VirtualInputManager")
+
+local MODE_NAMES = {"搖桿（模擬觸控）", "搖桿（控制模組）", "飄（飛行）", "直接走（舊方式）"}
+local MODE_LABELS = {
+    ["搖桿（模擬觸控）"] = "touch",
+    ["搖桿（控制模組）"] = "module",
+    ["飄（飛行）"] = "fly",
+    ["直接走（舊方式）"] = "moveto",
+}
+
+local Move = {
+    mode = "touch",
+    modeName = MODE_NAMES[1],
+    dir = nil,               -- 想走的方向（水平的單位向量），nil = 不動
+    vec = Vector3.zero,      -- 搖桿的輸出（相機座標）
+    touching = false,
+    lx = 0, ly = 0,
+    area = nil, pad = 2,     -- 撿花時用來把角色限制在區域內
+    dist = 0,                -- 離目標的水平距離
+    flySpeed = 30,           -- 飄行速度
+    hover = 4,               -- 飄行時離地高度
+    bv = nil,                -- 飄行用的 BodyVelocity
+    users = {},              -- 哪些功能正在用移動（撿花、翻機器人）
+    active = false,
+}
+local TOUCH_ID = 11
+local hasTouchApi = pcall(function()
+    local _ = VIM.SendTouchEvent
+end)
+
+local function flat(v)
+    return Vector3.new(v.X, 0, v.Z)
+end
+
+-- 找螢幕上的搖桿（固定搖桿或動態搖桿）
+local function findStick()
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    local tg = pg and pg:FindFirstChild("TouchGui")
+    local tf = tg and tg:FindFirstChild("TouchControlFrame")
+    if not tf then
+        return nil
+    end
+    for _, name in ipairs({"ThumbstickFrame", "DynamicThumbstickFrame"}) do
+        local f = tf:FindFirstChild(name)
+        if f and f.Visible then
+            return f, name, tg
+        end
+    end
+    return nil
+end
+
+-- 搖桿的中心點（螢幕座標）和推到底的半徑
+local function stickGeometry()
+    local f, name, tg = findStick()
+    if not f then
+        return nil
+    end
+    local inset = Vector2.new(0, 0)
+    if tg and not tg.IgnoreGuiInset then
+        inset = GuiService:GetGuiInset()
+    end
+    local pos, size = f.AbsolutePosition + inset, f.AbsoluteSize
+    if name == "ThumbstickFrame" then
+        return pos + size / 2, math.min(size.X, size.Y) / 2 * 0.8
+    end
+    -- 動態搖桿：在這個區域內按下去的位置就是搖桿中心
+    return pos + Vector2.new(size.X * 0.5, size.Y * 0.6), 55
+end
+
+local function sendTouch(state, x, y)
+    return pcall(function()
+        VIM:SendTouchEvent(TOUCH_ID, state, x, y)
+    end)
+end
+
+-- 實際用的方式：模擬觸控找不到搖桿或不支援時，自動改用控制模組
+function Move.effective()
+    if Move.mode == "moveto" then
+        return "moveto"
+    end
+    if Move.mode == "fly" then
+        return "fly"
+    end
+    if Move.mode == "touch" and hasTouchApi and stickGeometry() then
+        return "touch"
+    end
+    return "module"
+end
+
+-- 控制模組：把遊戲讀搖桿的函式換成我們的輸出（沒在移動時還是用真的搖桿）
+local hooked = nil
+local lastHookTry = 0
+local function ensureHook()
+    if tick() - lastHookTry < 0.5 then
+        return
+    end
+    lastHookTry = tick()
+    local ok, ctrl = pcall(function()
+        local ps = LocalPlayer:FindFirstChild("PlayerScripts")
+        local pm = ps and ps:FindFirstChild("PlayerModule")
+        return pm and require(pm):GetControls()
+    end)
+    if not (ok and ctrl) then
+        return
+    end
+    local ac = ctrl.activeController
+    if ac and hooked ~= ac then
+        hooked = ac
+        local og = ac.GetMoveVector
+        ac.GetMoveVector = function(self2, ...)
+            if Move.dir and Move.effective() == "module" then
+                return Move.vec
+            end
+            return og(self2, ...)
+        end
+    end
+end
+
+-- 朝 pos 的方向走（clamp = true 時不讓角色走出掛機區）
+function Move.to(hum, root, pos, clamp)
+    if Move.effective() == "moveto" then
+        hum:MoveTo(pos)
+        return
+    end
+    local off = flat(pos - root.Position)
+    Move.dist = off.Magnitude
+    if off.Magnitude < 1 then
+        Move.dir = nil
+        return
+    end
+    local d = off.Unit
+    if clamp and Move.area then
+        local a, pad, p = Move.area, Move.pad, root.Position
+        local x, z = d.X, d.Z
+        if p.X <= a.minX + pad and x < 0 then x = 0 end
+        if p.X >= a.maxX - pad and x > 0 then x = 0 end
+        if p.Z <= a.minZ + pad and z < 0 then z = 0 end
+        if p.Z >= a.maxZ - pad and z > 0 then z = 0 end
+        local v = Vector3.new(x, 0, z)
+        if v.Magnitude < 0.2 then
+            Move.dir = nil
+            return
+        end
+        d = v.Unit
+    end
+    Move.dir = d
+end
+
+function Move.stop(hum, root)
+    Move.dir = nil
+    if Move.mode == "moveto" and hum and root then
+        hum:MoveTo(root.Position)
+    end
+end
+
+-- 放開搖桿（關閉腳本時用）
+function Move.release()
+    Move.dir = nil
+    Move.users.petal, Move.users.flip = false, false
+    Move.active = false
+    Move.dropFly()
+    if Move.touching then
+        sendTouch(2, Move.lx, Move.ly)
+        Move.touching = false
+    end
+end
+
+-- 開始用搖桿前的檢查：找不到搖桿、或選單擋住搖桿時提醒
+function Move.check()
+    if Move.mode == "touch" and Move.effective() ~= "touch" then
+        notify("找不到螢幕搖桿", "已改用控制模組模擬搖桿；沒反應的話，到「移動方式」換一種", 6)
+    elseif Move.effective() == "touch" then
+        local c = stickGeometry()
+        if c and UI:IsOverMenu(c.X, c.Y) then
+            notify("選單擋住搖桿", "請先隱藏選單，不然搖桿會按不到", 6)
+        end
+    end
+end
+
+-- 哪個功能正在使用移動（都沒在用時，飄行會關掉）
+function Move.setUser(name, v)
+    Move.users[name] = v and true or false
+    Move.active = (Move.users.petal or Move.users.flip) and true or false
+end
+
+-- 飄行：用 BodyVelocity 讓角色飄在地面上方，水平方向朝目標移動
+local flyParams = RaycastParams.new()
+flyParams.FilterType = Enum.RaycastFilterType.Exclude
+
+function Move.dropFly()
+    Move.gyF = nil
+    if Move.bv then
+        Move.bv:Destroy()
+        Move.bv = nil
+    end
+end
+
+local function groundYAt(pos)
+    local ignore = {}
+    if LocalPlayer.Character then
+        table.insert(ignore, LocalPlayer.Character)
+    end
+    local petals = workspace:FindFirstChild("FlowerPetals")
+    if petals then
+        table.insert(ignore, petals)
+    end
+    flyParams.FilterDescendantsInstances = ignore
+    local hit = workspace:Raycast(pos + Vector3.new(0, 2, 0), Vector3.new(0, -300, 0), flyParams)
+    return hit and hit.Position.Y or nil
+end
+
+function Move.flyStep(d)
+    local root = getRoot()
+    if not (root and Move.active) then
+        Move.dropFly()
+        return
+    end
+    if not Move.bv or Move.bv.Parent ~= root then
+        Move.dropFly()
+        local bv = Instance.new("BodyVelocity")
+        bv.MaxForce = Vector3.new(1e9, 1e9, 1e9)
+        bv.Velocity = Vector3.zero
+        bv.Parent = root
+        Move.bv = bv
+    end
+    -- 垂直：維持在地面上方 hover 格；水平：朝目標移動，越靠近越慢
+    local gy = groundYAt(root.Position)
+    local vy = 0
+    if gy then
+        -- 地面高度做平滑，避免偵測到的地面忽高忽低，讓角色上下抖
+        Move.gyF = Move.gyF and (Move.gyF + (gy - Move.gyF) * 0.15) or gy
+        local err = (Move.gyF + Move.hover) - root.Position.Y
+        -- 差不到 0.5 格就不修正（死區），不然停下來時會一直上下晃
+        if math.abs(err) > 0.5 then
+            vy = math.clamp(err * 3, -25, 25)
+        end
+    end
+    local hv = Vector3.zero
+    if d then
+        hv = d * math.min(Move.flySpeed, math.max(Move.dist, 1) * 6)
+    end
+    Move.bv.Velocity = Vector3.new(hv.X, vy, hv.Z)
+end
+
+RunService.Heartbeat:Connect(function()
+    local d = Move.dir
+    local mode = Move.effective()
+
+    -- 不用觸控了（停止、或換了方式）就放開手指
+    if Move.touching and not (d and mode == "touch") then
+        sendTouch(2, Move.lx, Move.ly)
+        Move.touching = false
+    end
+    if mode == "fly" then
+        Move.flyStep(d)
+        return
+    else
+        Move.dropFly()
+    end
+    if not d or mode == "moveto" then
+        return
+    end
+
+    local cam = workspace.CurrentCamera
+    if not cam then
+        return
+    end
+    -- 搖桿往上 = 相機的前方，所以要把世界方向換成「相機的前、右」
+    local look, right = flat(cam.CFrame.LookVector), flat(cam.CFrame.RightVector)
+    if look.Magnitude > 0.01 then look = look.Unit end
+    if right.Magnitude > 0.01 then right = right.Unit end
+    local sx, sy = d:Dot(right), d:Dot(look)
+    Move.vec = Vector3.new(sx, 0, -sy)
+
+    if mode == "touch" then
+        local center, radius = stickGeometry()
+        if center then
+            if not Move.touching then
+                sendTouch(0, center.X, center.Y)
+                Move.touching = true
+            end
+            local p = center + Vector2.new(sx, -sy) * radius
+            Move.lx, Move.ly = p.X, p.Y
+            sendTouch(1, p.X, p.Y)
+        end
+    else
+        ensureHook()
+    end
+end)
+
+-- ===== 設定存檔（只存這個介面自己的設定）=====
+local CONFIG_FILE = "KaiScript_SakuraAFK.json"
+local reg = {}
+
+local function regToggle(key, el, get)
+    table.insert(reg, {key = key, kind = "toggle", el = el, get = get})
+end
+local function regNumber(key, el, get, set)
+    table.insert(reg, {key = key, kind = "number", el = el, get = get, set = set})
+end
+local function regDropdown(key, el, get, set)
+    table.insert(reg, {key = key, kind = "dropdown", el = el, get = get, set = set})
+end
+local function regText(key, el, get, set)
+    table.insert(reg, {key = key, kind = "text", el = el, get = get, set = set})
+end
+
+local function saveConfig()
+    if not (writefile and HttpService) then
+        notify("無法儲存", "這個執行器不支援檔案功能")
+        return
+    end
+    local data = {}
+    for _, r in ipairs(reg) do
+        data[r.key] = r.get()
+    end
+    local ok, err = pcall(function()
+        writefile(CONFIG_FILE, HttpService:JSONEncode(data))
+    end)
+    if ok then
+        notify("已儲存", "櫻 mini game AFK 的設定已存檔")
+    else
+        notify("儲存失敗", tostring(err))
+    end
+end
+
+local deleteConfirmUntil = 0
+local function deleteConfig()
+    if not (isfile and delfile) then
+        notify("無法刪除", "執行器不支援檔案刪除（需要 isfile、delfile）", 5)
+        return
+    end
+    local ok, exists = pcall(isfile, CONFIG_FILE)
+    if not ok then
+        notify("檢查失敗", tostring(exists), 5)
+        return
+    end
+    if not exists then
+        deleteConfirmUntil = 0
+        notify("沒有設定檔", "目前沒有已儲存的設定", 4)
+        return
+    end
+    local now = os.clock()
+    if now > deleteConfirmUntil then
+        deleteConfirmUntil = now + 8
+        notify("確認刪除", "8 秒內再按一次「刪除設定」才會永久刪除存檔；目前功能不受影響", 7)
+        return
+    end
+    deleteConfirmUntil = 0
+    local success, err = pcall(delfile, CONFIG_FILE)
+    local checkOk, stillExists = pcall(isfile, CONFIG_FILE)
+    if success and checkOk and not stillExists then
+        notify("已刪除設定", "已移除儲存檔；目前正在執行的設定不會重設", 5)
+    else
+        notify("刪除失敗", tostring(err or (checkOk and "檔案仍存在" or stillExists)), 5)
+    end
+end
+
+local function loadConfig(quiet)
+    if not (isfile and readfile) or not isfile(CONFIG_FILE) then
+        if not quiet then
+            notify("沒有存檔", "請先按「儲存設定」")
+        end
+        return
+    end
+    local ok, data = pcall(function()
+        return HttpService:JSONDecode(readfile(CONFIG_FILE))
+    end)
+    if not ok or type(data) ~= "table" then
+        return
+    end
+    -- 先套用數字、選項和文字（地塊要先於掛機點），再套用開關
+    for _, r in ipairs(reg) do
+        local v = data[r.key]
+        if v ~= nil then
+            if r.kind == "number" and type(v) == "number" then
+                pcall(function() r.set(v) r.el:Set(tostring(v)) end)
+            elseif r.kind == "dropdown" and type(v) == "string" then
+                pcall(function() r.set(v) r.el:Set({v}) end)
+            elseif r.kind == "text" and type(v) == "string" then
+                pcall(function() r.set(v) r.el:Set(v) end)
+            end
+        end
+    end
+    for _, r in ipairs(reg) do
+        local v = data[r.key]
+        if v ~= nil and r.kind == "toggle" and type(v) == "boolean" then
+            pcall(function() r.el:Set(v) end)
+        end
+    end
+    if not quiet then
+        notify("已載入", "設定已套用")
+    end
+end
+
+-- ===== 介面 =====
+local Window = UI:CreateWindow({
+    Name = "櫻 mini game AFK",
+    GuiName = "KaiUI_SakuraAFK",
+    FloatText = "櫻",
+    FloatPosition = UDim2.new(0, 10, 0.55, 0),
+    PositionOffset = Vector2.new(30, 20),
+    DisplayOrder = 101,
+    Theme = "black",  -- 額外的介面一律用純黑主題
+})
+
+-- 左邊的分類分頁（順序就是左邊選單的順序）
+local PetalTab = Window:CreateTab("自動撿花")
+local RobotTab = Window:CreateTab("自動翻機器人")
+local FarmTab = Window:CreateTab("每日小農場")
+local FishTab = Window:CreateTab("悠閒釣魚")
+local LavaTab = Window:CreateTab("熔岩攀爬")
+local BjTab = Window:CreateTab("21 點")
+local DungeonTab = Window:CreateTab("深淵地牢")
+local SetTab = Window:CreateTab("設定")
+
+-- ========== 自動撿花（含移動方式）==========
+local AfkTab = PetalTab
+
+AfkTab:CreateSection("移動方式（撿花、翻機器人都會用）")
+
+local dMove = AfkTab:CreateDropdown({
+    Name = "移動方式",
+    Options = MODE_NAMES,
+    CurrentOption = {Move.modeName},
+    Callback = function(opt)
+        local n = type(opt) == "table" and opt[1] or opt
+        if MODE_LABELS[n] then
+            Move.mode = MODE_LABELS[n]
+            Move.modeName = n
+        end
+    end,
+})
+regDropdown("moveMode", dMove, function() return Move.modeName end, function(v)
+    if MODE_LABELS[v] then
+        Move.mode = MODE_LABELS[v]
+        Move.modeName = v
+    end
+end)
+
+local iFlySpeed = AfkTab:CreateInput({
+    Name = "飄行速度",
+    PlaceholderText = "預設 30（只有「飄」會用到）",
+    Callback = function(text)
+        local n = tonumber(text)
+        if n and n >= 5 and n <= 150 then
+            Move.flySpeed = n
+            notify("已設定", "飄行速度 = " .. n)
+        else
+            notify("輸入錯誤", "請輸入 5~150 的數字")
+        end
+    end,
+})
+regNumber("flySpeed", iFlySpeed, function() return Move.flySpeed end, function(v)
+    Move.flySpeed = v
+end)
+
+local iHover = AfkTab:CreateInput({
+    Name = "飄行高度（離地幾格）",
+    PlaceholderText = "預設 4，太高會撿不到花",
+    Callback = function(text)
+        local n = tonumber(text)
+        if n and n >= 1 and n <= 30 then
+            Move.hover = n
+            notify("已設定", "飄行高度 = " .. n)
+        else
+            notify("輸入錯誤", "請輸入 1~30 的數字")
+        end
+    end,
+})
+regNumber("hover", iHover, function() return Move.hover end, function(v)
+    Move.hover = v
+end)
+
+-- 掛機
+AfkTab:CreateSection("掛機")
+
+do
+    local petalOn = false
+    local petalRange = 120
+    local goHomeOn = true                            -- 撿完花走回掛機點
+    local homePos = Vector3.new(652, 4, -598)        -- 掛機區的重生點
+    local zoneName = "全部"
+    local onHomeChanged = function() end             -- 掛機點被自動換掉時，更新輸入框（稍後指定）
+    local skipUntil = setmetatable({}, {__mode = "k"})  -- 撿不到的花先跳過一陣子
+
+    -- ===== 掛機區範圍（四個角量出來的座標）=====
+    local AREA = {minX = 587, maxX = 1001, minZ = -693, maxZ = -495}
+    local EDGE_PAD = 2        -- 角色離邊界至少保持的距離（格）
+    Move.area, Move.pad = AREA, EDGE_PAD
+
+    -- 位置是否在掛機區內（超出去的花不撿）
+    local function inArea(pos)
+        return pos.X >= AREA.minX + 1 and pos.X <= AREA.maxX - 1
+            and pos.Z >= AREA.minZ + 1 and pos.Z <= AREA.maxZ - 1
+    end
+
+    -- 四面牆（只在你自己的畫面裡存在，用來擋住不要掉出去）
+    local wallFolder = nil
+
+    local function clearWalls()
+        if wallFolder then
+            wallFolder:Destroy()
+            wallFolder = nil
+        end
+    end
+
+    local function buildWalls()
+        clearWalls()
+        wallFolder = Instance.new("Folder")
+        wallFolder.Name = "KaiWalls"
+        wallFolder.Parent = workspace
+
+        local T, H, Y = 4, 60, 20   -- 厚度、高度、中心高度
+        local cx, cz = (AREA.minX + AREA.maxX) / 2, (AREA.minZ + AREA.maxZ) / 2
+        local w, d = AREA.maxX - AREA.minX, AREA.maxZ - AREA.minZ
+
+        local function wall(size, pos)
+            local part = Instance.new("Part")
+            part.Anchored = true
+            part.CanCollide = true
+            part.CanTouch = false
+            part.CanQuery = false
+            part.CastShadow = false
+            part.Material = Enum.Material.SmoothPlastic
+            part.Color = Color3.fromRGB(180, 220, 255)
+            part.Transparency = 0.85
+            part.Size = size
+            part.Position = pos
+            part.Parent = wallFolder
+        end
+
+        -- 牆的內側剛好貼在區域邊界上
+        wall(Vector3.new(w + 2 * T, H, T), Vector3.new(cx, Y, AREA.minZ - T / 2))
+        wall(Vector3.new(w + 2 * T, H, T), Vector3.new(cx, Y, AREA.maxZ + T / 2))
+        wall(Vector3.new(T, H, d), Vector3.new(AREA.minX - T / 2, Y, cz))
+        wall(Vector3.new(T, H, d), Vector3.new(AREA.maxX + T / 2, Y, cz))
+    end
+
+    -- ===== 地塊選擇 =====
+    local ZONES = {
+        ["草地區"] = {minX = 717, maxX = 1001, minZ = -693, maxZ = -495, home = Vector3.new(824, 1, -581)},
+        ["木板區"] = {minX = 587, maxX = 717, minZ = -693, maxZ = -496, home = Vector3.new(652, 4, -598)},
+        ["全部"] = {minX = 587, maxX = 1001, minZ = -693, maxZ = -495},  -- 掛機點自己調
+    }
+
+    local function setZone(name)
+        local z = ZONES[name]
+        if not z then
+            return
+        end
+        zoneName = name
+        AREA.minX, AREA.maxX, AREA.minZ, AREA.maxZ = z.minX, z.maxX, z.minZ, z.maxZ
+        if z.home then
+            homePos = z.home  -- 草地區、木板區的掛機點自動換成預設的
+            onHomeChanged()
+        end
+        if petalOn then
+            buildWalls()  -- 自動撿花開著時，牆也跟著換位置
+        end
+    end
+
+    -- ===== 避開傳送陣 =====
+    local HAZARD_MARGIN = 3.5   -- 離傳送陣邊緣至少保持的距離
+    local hazards = {}
+    local lastHazardScan = 0
+
+    local function scanHazards()
+        if tick() - lastHazardScan < 8 then
+            return
+        end
+        lastHazardScan = tick()
+        local list = {}
+        local scopes = {}
+        for _, name in ipairs({"SakuraRestArea", "RobotTreasureHunt"}) do
+            local f = workspace:FindFirstChild(name)
+            if f then
+                table.insert(scopes, f)
+            end
+        end
+        if #scopes == 0 then
+            scopes = {workspace}
+        end
+        for _, scope in ipairs(scopes) do
+            for _, v in ipairs(scope:GetDescendants()) do
+                if v:IsA("BasePart") and v.Name:lower():find("teleport") then
+                    table.insert(list, v)
+                end
+            end
+        end
+        hazards = list
+    end
+
+    local function toLocal2(part, pos)
+        local p = part.CFrame:PointToObjectSpace(pos)
+        return Vector2.new(p.X, p.Z)
+    end
+
+    local function toWorld(part, v2, y)
+        local w = part.CFrame:PointToWorldSpace(Vector3.new(v2.X, 0, v2.Y))
+        return Vector3.new(w.X, y, w.Z)
+    end
+
+    -- 線段 a→b 是否穿過以原點為中心、半寬 hx、半長 hz 的矩形
+    local function segHits(a, b, hx, hz)
+        local d = b - a
+        local t0, t1 = 0, 1
+        local axes = {{a.X, d.X, hx}, {a.Y, d.Y, hz}}
+        for _, ax in ipairs(axes) do
+            local ao, dd, h = ax[1], ax[2], ax[3]
+            if math.abs(dd) < 1e-6 then
+                if ao < -h or ao > h then
+                    return false
+                end
+            else
+                local ta, tb = (-h - ao) / dd, (h - ao) / dd
+                if ta > tb then
+                    ta, tb = tb, ta
+                end
+                t0 = math.max(t0, ta)
+                t1 = math.min(t1, tb)
+                if t0 > t1 then
+                    return false
+                end
+            end
+        end
+        return true
+    end
+
+    local function hazardHalf(part)
+        return part.Size.X / 2 + HAZARD_MARGIN, part.Size.Z / 2 + HAZARD_MARGIN
+    end
+
+    -- 這個位置是否在傳送陣（含安全距離）範圍內
+    local function inHazard(pos)
+        for _, h in ipairs(hazards) do
+            if h.Parent then
+                local hx, hz = hazardHalf(h)
+                local a = toLocal2(h, pos)
+                if math.abs(a.X) < hx and math.abs(a.Y) < hz then
+                    return true
+                end
+            end
+        end
+        return false
+    end
+
+    -- 從 from 走到 to，如果會踩到傳送陣，回傳要先繞過去的中繼點；不用繞就回傳 nil
+    local function detour(from, to)
+        scanHazards()
+        for _, h in ipairs(hazards) do
+            if h.Parent then
+                local hx, hz = hazardHalf(h)
+                local a, b = toLocal2(h, from), toLocal2(h, to)
+                local y = from.Y
+
+                -- 已經站在危險範圍裡：先往最近的邊走出去
+                if math.abs(a.X) < hx and math.abs(a.Y) < hz then
+                    local dx, dz = hx - math.abs(a.X), hz - math.abs(a.Y)
+                    local out
+                    if dx < dz then
+                        out = Vector2.new((a.X >= 0 and 1 or -1) * (hx + 1), a.Y)
+                    else
+                        out = Vector2.new(a.X, (a.Y >= 0 and 1 or -1) * (hz + 1))
+                    end
+                    return toWorld(h, out, y)
+                end
+
+                local ehx, ehz = hx - 0.05, hz - 0.05
+                if segHits(a, b, ehx, ehz) then
+                    local c = {
+                        Vector2.new(-hx, -hz), Vector2.new(hx, -hz),
+                        Vector2.new(hx, hz), Vector2.new(-hx, hz),
+                    }
+                    local best, bestLen
+                    local function consider(first, pts)
+                        local prev, len = a, 0
+                        for _, q in ipairs(pts) do
+                            if segHits(prev, q, ehx, ehz) then
+                                return
+                            end
+                            len += (q - prev).Magnitude
+                            prev = q
+                        end
+                        if segHits(prev, b, ehx, ehz) then
+                            return
+                        end
+                        len += (b - prev).Magnitude
+                        if not bestLen or len < bestLen then
+                            best, bestLen = first, len
+                        end
+                    end
+                    for i = 1, 4 do
+                        consider(c[i], {c[i]})
+                        consider(c[i], {c[i], c[i % 4 + 1]})
+                    end
+                    if best then
+                        return toWorld(h, best, y)
+                    end
+                end
+            end
+        end
+        return nil
+    end
+
+    FarmAPI.detour = detour
+    FarmAPI.inHazard = inHazard
+
+    -- 預測花最後會落在哪裡：往正下方打射線找地面，
+    -- 如果花是會受重力往下掉的，再把水平的飄移一起算進去
+    local landParams = RaycastParams.new()
+    landParams.FilterType = Enum.RaycastFilterType.Exclude
+
+    local function landingPoint(petal)
+        local pos = petal.Position
+        local ignore = {}
+        if LocalPlayer.Character then
+            table.insert(ignore, LocalPlayer.Character)
+        end
+        local folder = workspace:FindFirstChild("FlowerPetals")
+        if folder then
+            table.insert(ignore, folder)
+        end
+        landParams.FilterDescendantsInstances = ignore
+
+        local hit = workspace:Raycast(pos, Vector3.new(0, -1000, 0), landParams)
+        local groundY = hit and hit.Position.Y or pos.Y
+        local h = math.max(pos.Y - groundY, 0)
+        local x, z = pos.X, pos.Z
+
+        if not petal.Anchored and h > 1 then
+            local v = petal.AssemblyLinearVelocity
+            local g = workspace.Gravity
+            local t = (v.Y + math.sqrt(v.Y * v.Y + 2 * g * h)) / g
+            t = math.clamp(t, 0, 6)
+            x += v.X * t
+            z += v.Z * t
+        end
+        return Vector3.new(x, groundY, z), h
+    end
+
+    -- 找範圍內最近的花（用預測的落地點算距離）
+    local function nearestPetal(root)
+        local folder = workspace:FindFirstChild("FlowerPetals")
+        if not folder then
+            return nil
+        end
+        scanHazards()
+        local best, bestD
+        for _, p in ipairs(folder:GetDescendants()) do
+            if p:IsA("BasePart") and p.Name == "Petal" and p.Parent
+                and (skipUntil[p] or 0) < tick() then
+                local land = landingPoint(p)
+                if inArea(land) and not inHazard(land) then
+                    local off = land - root.Position
+                    local flat = Vector3.new(off.X, 0, off.Z).Magnitude
+                    if flat <= petalRange and (not bestD or flat < bestD) then
+                        best, bestD = p, flat
+                    end
+                end
+            end
+        end
+        return best
+    end
+
+    -- 走到花的落地點等它：一直更新預測位置，卡住就跳
+    local function walkTo(hum, root, petal)
+        local t0 = tick()
+        local lastPos, lastCheck = root.Position, tick()
+        local reachedAt = nil
+        while petalOn and petal.Parent and tick() - t0 < 12 and hum.Health > 0 do
+            local land, h = landingPoint(petal)
+
+            -- 落地點如果在傳送陣範圍內就放棄這朵
+            if inHazard(land) or not inArea(land) then
+                break
+            end
+
+            -- 如果直線會踩到傳送陣，先走到繞路的中繼點
+            local wp = detour(root.Position, land)
+            Move.to(hum, root, wp or land, true)
+
+            local off = land - root.Position
+            local flat = Vector3.new(off.X, 0, off.Z).Magnitude
+            if flat < 2.5 and h < 4 then
+                -- 花已經快落地了，站在那裡超過 1.5 秒還沒撿到，就放棄這朵
+                reachedAt = reachedAt or tick()
+                if tick() - reachedAt > 1.5 then
+                    break
+                end
+            else
+                reachedAt = nil
+            end
+
+            -- 卡住偵測：0.7 秒幾乎沒移動就跳一下（站著等花落下時不算）
+            if tick() - lastCheck > 0.7 then
+                if (root.Position - lastPos).Magnitude < 1 and flat > 3 then
+                    hum.Jump = true
+                end
+                lastPos, lastCheck = root.Position, tick()
+            end
+            task.wait(0.1)
+        end
+        if petal.Parent then
+            skipUntil[petal] = tick() + 5  -- 沒撿掉的花，5 秒內不再追
+        end
+    end
+
+    -- 走回掛機點；途中如果範圍內出現花，就立刻停下來（回到主迴圈去追花）
+    local function walkHome(hum, root)
+        local t0 = tick()
+        local lastPos, lastCheck = root.Position, tick()
+        while petalOn and goHomeOn and hum.Health > 0 and tick() - t0 < 30 do
+            local off = homePos - root.Position
+            local flat = Vector3.new(off.X, 0, off.Z).Magnitude
+            if flat < 3 then
+                break
+            end
+            if nearestPetal(root) then
+                return
+            end
+
+            local wp = detour(root.Position, homePos)
+            Move.to(hum, root, wp or homePos, true)
+
+            if tick() - lastCheck > 0.7 then
+                if (root.Position - lastPos).Magnitude < 1 then
+                    hum.Jump = true
+                end
+                lastPos, lastCheck = root.Position, tick()
+            end
+            task.wait(0.15)
+        end
+    end
+
+    task.spawn(function()
+        local wasOn = false
+        while true do
+            if petalOn then
+                wasOn = true
+                local root = getRoot()
+                local hum = getHumanoid()
+                if root and hum and hum.Health > 0 and not hum.Sit then
+                    local petal = nearestPetal(root)
+                    if petal then
+                        pcall(walkTo, hum, root, petal)
+                    elseif goHomeOn then
+                        local off = homePos - root.Position
+                        if Vector3.new(off.X, 0, off.Z).Magnitude >= 3 then
+                            pcall(walkHome, hum, root)
+                        else
+                            Move.stop(hum, root)
+                            task.wait(0.3)
+                        end
+                    else
+                        Move.stop(hum, root)
+                        task.wait(0.3)
+                    end
+                else
+                    Move.stop(hum, root)
+                    task.wait(0.5)
+                end
+                task.wait()
+            else
+                if wasOn then
+                    wasOn = false
+                    local root, hum = getRoot(), getHumanoid()
+                    if root and hum then
+                        Move.stop(hum, root)  -- 停下來
+                    end
+                end
+                task.wait(0.3)
+            end
+        end
+    end)
+
+    local dZone = AfkTab:CreateDropdown({
+        Name = "地塊選擇",
+        Options = {"草地區", "木板區", "全部"},
+        CurrentOption = {zoneName},
+        Callback = function(opt)
+            local z = type(opt) == "table" and opt[1] or opt
+            if ZONES[z] then
+                setZone(z)
+            end
+        end,
+    })
+    regDropdown("petalZone", dZone, function() return zoneName end, function(v)
+        setZone(v)
+    end)
+
+    local autoNoclip = false  -- 穿透是不是由「自動撿花」幫你打開的
+    local autoNoclipOn = true  -- 撿花時要不要自動開穿透
+    local tPetal = AfkTab:CreateToggle({
+        Name = "自動撿花（走過去）",
+        CurrentValue = false,
+        Callback = function(v)
+            petalOn = v
+            Move.setUser("petal", v)
+            if v then
+                buildWalls()
+                Move.check()
+            else
+                clearWalls()
+                Move.stop(getHumanoid(), getRoot())
+            end
+            -- 啟動時自動開穿透，讓角色能直接穿過物件走過去；關閉時只還原自己開的那次
+            if v and autoNoclipOn and Move.mode ~= "fly" and not noclipOn then
+                autoNoclip = true
+                pcall(function() tNoclip:Set(true) end)
+            elseif not v and autoNoclip then
+                autoNoclip = false
+                pcall(function() tNoclip:Set(false) end)
+            end
+        end,
+    })
+    -- 不存檔：避免下次載入設定時一開腳本就自己開始撿花、亂跑
+
+    local tAutoNoclip = AfkTab:CreateToggle({
+        Name = "撿花時自動穿透",
+        CurrentValue = true,
+        Callback = function(v)
+            autoNoclipOn = v
+        end,
+    })
+    regToggle("autoNoclip", tAutoNoclip, function() return autoNoclipOn end)
+
+    UI:OnClose(function()
+        petalOn = false
+        Move.release()
+        clearWalls()
+        if autoNoclip then
+            autoNoclip = false
+            noclipOn = false
+            restoreNoclip()
+        end
+    end)
+
+    local iPetalRange = AfkTab:CreateInput({
+        Name = "撿花範圍（輸入數字）",
+        PlaceholderText = "預設 120，只追這個距離內的花",
+        Callback = function(text)
+            local n = tonumber(text)
+            if n and n > 0 then
+                petalRange = n
+                notify("已設定", "撿花範圍 = " .. n)
+            else
+                notify("輸入錯誤", "請輸入大於 0 的數字")
+            end
+        end,
+    })
+    regNumber("petalRange", iPetalRange, function() return petalRange end, function(v)
+        petalRange = v
+    end)
+
+    local tGoHome = AfkTab:CreateToggle({
+        Name = "撿完花走回掛機點",
+        CurrentValue = true,
+        Callback = function(v)
+            goHomeOn = v
+        end,
+    })
+    regToggle("petalGoHome", tGoHome, function() return goHomeOn end)
+
+    local function homeText()
+        return string.format("%.1f, %.1f, %.1f", homePos.X, homePos.Y, homePos.Z)
+    end
+
+    local function parseHome(text)
+        local x, y, z = tostring(text):match("(-?%d+%.?%d*)%s*[,%s]%s*(-?%d+%.?%d*)%s*[,%s]%s*(-?%d+%.?%d*)")
+        x, y, z = tonumber(x), tonumber(y), tonumber(z)
+        if x and y and z then
+            return Vector3.new(x, y, z)
+        end
+    end
+
+    local iHome = AfkTab:CreateInput({
+        Name = "掛機點座標（x, y, z）",
+        PlaceholderText = "預設 652, 4, -598",
+        Callback = function(text)
+            local v = parseHome(text)
+            if v then
+                homePos = v
+                notify("已設定掛機點", "(" .. homeText() .. ")")
+            else
+                notify("輸入錯誤", "請輸入三個數字，例如 652, 4, -598")
+            end
+        end,
+    })
+    onHomeChanged = function()
+        pcall(function() iHome:Set(homeText()) end)
+    end
+    FarmAPI.setHome = function(v)
+        homePos = v
+        onHomeChanged()
+    end
+
+    regText("petalHome", iHome, homeText, function(v)
+        local pv = parseHome(v)
+        if pv then
+            homePos = pv
+        end
+    end)
+
+    AfkTab:CreateButton({
+        Name = "把目前位置設為掛機點",
+        Callback = function()
+            local root = getRoot()
+            if root then
+                homePos = root.Position
+                notify("已設定掛機點", "(" .. homeText() .. ")")
+                pcall(function() iHome:Set(homeText()) end)
+            else
+                notify("設定失敗", "找不到角色")
+            end
+        end,
+    })
+end
+
+-- ========== 自動翻機器人 ==========
+local AfkTab = RobotTab
+AfkTab:CreateSection("翻機器人")
+
+do
+    local flipOn = false
+    local flipDelay = 7.2         -- 遊戲每 7 秒才能點一次，多留 0.2 秒保險
+    local lastClickAt = 0
+    local jackpotFlowers = 3000   -- 中大獎會增加的花朵數（判斷用）
+    local targetInfo = "--"        -- 目前的目標（顯示用）
+    local extraDelay = 0           -- 遊戲自己有冷卻：沒收到回應就自動多等一點
+    local failCount = setmetatable({}, {__mode = "k"})
+    local lastResult, lastResultTime = nil, 0
+    local skipUntil = setmetatable({}, {__mode = "k"})
+    local tFlip
+
+    local function ser(v, d)
+        d = d or 0
+        if type(v) == "table" and d < 3 then
+            local t = {}
+            for k, x in pairs(v) do
+                table.insert(t, tostring(k) .. "=" .. ser(x, d + 1))
+            end
+            return "{" .. table.concat(t, ", ") .. "}"
+        end
+        return tostring(v)
+    end
+
+    -- 聽伺服器傳回來的點擊結果（沒中獎時會收到 type = "miss"）
+    task.spawn(function()
+        local ev = game:GetService("ReplicatedStorage"):WaitForChild("RobotGameEvent", 10)
+        if ev and ev:IsA("RemoteEvent") then
+            ev.OnClientEvent:Connect(function(...)
+                lastResult = {...}
+                lastResultTime = tick()
+            end)
+        else
+            warn("[卡依腳本] 找不到 RobotGameEvent，自動翻機器人無法判斷結果")
+        end
+    end)
+
+    -- 讀畫面上的花朵數（例如「🌸 5897 / 5000」或「🌸 5,897」）
+    local function dig(root, ...)
+        local cur = root
+        for _, name in ipairs({...}) do
+            cur = cur and cur:FindFirstChild(name)
+        end
+        return cur
+    end
+
+    local function readFlowers()
+        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+        if not pg then
+            return nil
+        end
+        local lbl = dig(pg, "HintPurchaseUI", "FlowerCard", "FlowerText")
+            or dig(pg, "PinballGui", "Main", "Frame", "TextLabel")
+        local num = lbl and tostring(lbl.Text):match("([%d,]+)")
+        return num and tonumber((num:gsub(",", "")))
+    end
+
+    local function finish(title, msg)
+        flipOn = false
+        Move.stop(getHumanoid(), getRoot())
+        pcall(function() tFlip:Set(false) end)
+        notify(title, msg, 10)
+    end
+
+    local function nearestRobot(root)
+        local hunt = workspace:FindFirstChild("RobotTreasureHunt")
+        local folder = hunt and hunt:FindFirstChild("Robots")
+        if not folder then
+            return nil
+        end
+        local best, bestD, bestCd
+        for _, r in ipairs(folder:GetChildren()) do
+            if r:IsA("BasePart") and (skipUntil[r] or 0) < tick()
+                and r.Transparency < 0.95 then  -- 被翻掉消失的（變透明）不點
+                local cd = r:FindFirstChildOfClass("ClickDetector")
+                if cd and not (FarmAPI.inHazard and FarmAPI.inHazard(r.Position)) then
+                    local d = (r.Position - root.Position).Magnitude
+                    if not bestD or d < bestD then
+                        best, bestD, bestCd = r, d, cd
+                    end
+                end
+            end
+        end
+        return best, bestCd
+    end
+
+    -- 走到機器人旁邊（進入點擊距離內）
+    local function approach(hum, root, robot, cd)
+        local need = math.max(math.min(cd.MaxActivationDistance, 10) - 2, 4)
+        local t0 = tick()
+        local lastPos, lastCheck = root.Position, tick()
+        while flipOn and robot.Parent and robot.Transparency < 0.95
+            and hum.Health > 0 and tick() - t0 < 8 do
+            if (robot.Position - root.Position).Magnitude <= need then
+                return true
+            end
+            local wp = FarmAPI.detour and FarmAPI.detour(root.Position, robot.Position)
+            Move.to(hum, root, wp or robot.Position)
+            if tick() - lastCheck > 0.7 then
+                if (root.Position - lastPos).Magnitude < 1 then
+                    hum.Jump = true
+                end
+                lastPos, lastCheck = root.Position, tick()
+            end
+            task.wait(0.1)
+        end
+        return false
+    end
+
+    local function step()
+        local root, hum = getRoot(), getHumanoid()
+        if not (root and hum) or hum.Health <= 0 then
+            return
+        end
+        local robot, cd = nearestRobot(root)
+        if not robot then
+            targetInfo = "附近沒有可以點的機器人"
+            return
+        end
+        targetInfo = string.format("%s 透明=%.2f 距離=%d", robot.Name, robot.Transparency,
+            (robot.Position - root.Position).Magnitude)
+        targetInfo = targetInfo .. string.format(" 等待+%.1fs", extraDelay)
+
+        -- 一定要走到機器人旁邊才點（不能遠距點擊）
+        local arrived = approach(hum, root, robot, cd)
+        Move.stop(hum, root)
+        if not arrived then
+            skipUntil[robot] = tick() + 5
+            return
+        end
+        -- 冷卻還沒到就先站在旁邊等（走路的時間也算在冷卻裡，所以不會浪費）
+        while flipOn and robot.Parent and robot.Transparency < 0.95
+            and tick() - lastClickAt < flipDelay + extraDelay do
+            local left = flipDelay + extraDelay - (tick() - lastClickAt)
+            targetInfo = string.format("%s 冷卻中，還要等 %.1f 秒", robot.Name, math.max(left, 0))
+            task.wait(0.1)
+        end
+        if not (flipOn and robot.Parent) then
+            return
+        end
+        -- 走到之後、點之前，再確認一次它還在（可能剛好被別人翻掉了）
+        if robot.Transparency >= 0.95 then
+            skipUntil[robot] = tick() + 300
+            return
+        end
+
+        local before = lastResultTime
+        local flowersBefore = readFlowers()
+        local function gained()
+            local f = readFlowers()
+            return (f and flowersBefore) and (f - flowersBefore) or nil
+        end
+        lastClickAt = tick()
+        pcall(fireclickdetector, cd)
+
+        -- 等伺服器回報結果
+        local t0 = tick()
+        while flipOn and tick() - t0 < 2.5 and lastResultTime <= before do
+            task.wait(0.05)
+        end
+
+        if lastResultTime > before then
+            -- 伺服器有回應，代表這隻已經翻過了，5 分鐘內不再點（它可能只是變透明、還留在場上）
+            skipUntil[robot] = tick() + 300
+            local d = lastResult and lastResult[1]
+            local kind = type(d) == "table" and d.type or d
+            if kind ~= "miss" then
+                -- 不是「沒中」：再等最多 2 秒看花朵有沒有增加，用來確認是不是真的中大獎
+                local t1, g = tick(), gained()
+                while flipOn and tick() - t1 < 2 and not (g and g >= jackpotFlowers) do
+                    task.wait(0.1)
+                    g = gained()
+                end
+                if g and g >= jackpotFlowers then
+                    finish("中大獎了！", "花朵 +" .. g)
+                else
+                    finish("收到不是 miss 的結果",
+                        "花朵沒有增加 " .. jackpotFlowers .. "，請自己確認：" .. ser(lastResult))
+                end
+            else
+                -- 就算事件寫 miss，只要花朵一次暴增也算中獎
+                local g = gained()
+                if g and g >= jackpotFlowers then
+                    finish("中大獎了！", "花朵 +" .. g)
+                end
+            end
+        else
+            -- 沒收到回應：很可能還在遊戲自己的冷卻裡，不能硬點。
+            -- 自動多等 0.5 秒（最多 6 秒），同一隻最多重試 3 次才換下一隻
+            extraDelay = math.min(extraDelay + 0.5, 6)
+            failCount[robot] = (failCount[robot] or 0) + 1
+            if failCount[robot] >= 3 then
+                failCount[robot] = nil
+                skipUntil[robot] = tick() + 5
+            end
+        end
+    end
+
+    task.spawn(function()
+        while true do
+            if flipOn then
+                local ok, err = pcall(step)
+                if not ok then
+                    warn("[卡依腳本] 自動翻機器人錯誤：" .. tostring(err))
+                    task.wait(1)
+                end
+                task.wait(0.1)
+            else
+                task.wait(0.3)
+            end
+        end
+    end)
+
+    -- 顯示目前正要點的機器人（除錯用，點一下可以複製）
+    do
+        local n = #langItems
+        local targetBtn = AfkTab:CreateButton({
+            Name = "目前目標  --",
+            Callback = function()
+                if setclipboard then
+                    pcall(setclipboard, targetInfo)
+                end
+                notify("目前目標", targetInfo, 4)
+            end,
+        })
+        while #langItems > n do
+            table.remove(langItems)
+        end
+        task.spawn(function()
+            while true do
+                targetBtn:SetName((useEnglish and "Target  " or "目前目標  ") .. targetInfo)
+                task.wait(0.3)
+            end
+        end)
+    end
+
+    tFlip = AfkTab:CreateToggle({
+        Name = "自動翻機器人（到有結果為止）",
+        CurrentValue = false,
+        Callback = function(v)
+            if v and not fireclickdetector then
+                notify("無法啟用", "這個執行器不支援 fireclickdetector")
+                task.defer(function()
+                    pcall(function() tFlip:Set(false) end)
+                end)
+                return
+            end
+            flipOn = v
+            Move.setUser("flip", v)
+            if v then
+                Move.check()
+            else
+                Move.stop(getHumanoid(), getRoot())
+            end
+        end,
+    })
+    -- 不存檔：避免下次載入設定時一啟動就自動點
+
+    local iFlipDelay = AfkTab:CreateInput({
+        Name = "翻機器人間隔（秒）",
+        PlaceholderText = "預設 7.2（遊戲冷卻 7 秒）",
+        Callback = function(text)
+            local n = tonumber(text)
+            if n and n >= 0 then
+                flipDelay = n
+                notify("已設定", "間隔 = " .. n .. " 秒")
+            else
+                notify("輸入錯誤", "請輸入數字")
+            end
+        end,
+    })
+    regNumber("flipDelay", iFlipDelay, function() return flipDelay end, function(v)
+        flipDelay = v
+    end)
+
+    local iJackpot = AfkTab:CreateInput({
+        Name = "大獎花朵數（判斷用）",
+        PlaceholderText = "預設 3000，中大獎會增加的花朵",
+        Callback = function(text)
+            local n = tonumber(text)
+            if n and n > 0 then
+                jackpotFlowers = n
+                notify("已設定", "大獎花朵數 = " .. n)
+            else
+                notify("輸入錯誤", "請輸入大於 0 的數字")
+            end
+        end,
+    })
+    regNumber("jackpotFlowers", iJackpot, function() return jackpotFlowers end, function(v)
+        jackpotFlowers = v
+    end)
+
+    UI:OnClose(function()
+        flipOn = false
+    end)
+end
+
+-- ====================================================================
+--  每日小農場
+--  做法：直接觸發農場畫面上的按鈕，不需要知道 FarmEvent 的參數
+--  不會按任何 Robux 解鎖或解鎖田地的按鈕
+-- ====================================================================
+local AfkTab = FarmTab
+AfkTab:CreateSection("獨立農場全自動掛機（跨服續掛）")
+AfkTab:CreateButton({
+    Name = "開啟農場全自動掛機（20 秒除蟲／跨服續掛）",
+    Callback = function()
+        local ok, err = pcall(function()
+            local scriptText = game:HttpGet("https://raw.githubusercontent.com/Kai090898/Kai-script/main/%E6%AB%BB%E8%BE%B2%E5%A0%B4%E8%87%AA%E5%8B%95%E6%8E%9B%E6%A9%9F.txt")
+            local run, compileErr = loadstring(scriptText)
+            assert(run, compileErr)
+            run()
+        end)
+        if not ok then
+            notify("農場掛機載入失敗", tostring(err), 6)
+        end
+    end,
+})
+-- 獨立版會建立自己的農場介面；請勿同時啟用下方舊版「自動小農場」。
+
+AfkTab:CreateSection("每日小農場")
+
+do
+    local VIM = game:GetService("VirtualInputManager")
+    local GuiService = game:GetService("GuiService")
+
+    local SEEDS = {"無", "青菜", "蘿蔔", "番茄", "玉米", "向日葵"}
+
+    local farmOn = false
+    local harvestOn, plantOn, waterOn, pestOn, sunOn = true, false, true, true, true
+    local closeAfter = true      -- 操作完，如果是腳本自己打開的畫面就關回去
+    local seedName = "玉米"
+    local farmInterval = 60      -- 每隔幾秒檢查一次
+    local status = "--"
+
+    local function getPg()
+        return LocalPlayer:FindFirstChild("PlayerGui")
+    end
+
+    -- 在介面裡找文字符合條件的 TextButton（只比對按鈕，不會碰到文字標籤）
+    local function findButton(root, pred)
+        for _, v in ipairs(root:GetDescendants()) do
+            if v:IsA("TextButton") and pred(v.Text) then
+                return v
+            end
+        end
+    end
+
+    local function has(text, s)
+        return text:find(s, 1, true) ~= nil
+    end
+
+    -- 按下按鈕：優先觸發按鈕本身的點擊事件，不行再模擬點中心
+    local function press(btn)
+        if getconnections then
+            for _, sig in ipairs({btn.Activated, btn.MouseButton1Click}) do
+                local ok, conns = pcall(getconnections, sig)
+                if ok and conns and #conns > 0 then
+                    for _, c in ipairs(conns) do
+                        pcall(function() c:Fire() end)
+                    end
+                    return true
+                end
+            end
+        end
+        local gui = btn:FindFirstAncestorWhichIsA("ScreenGui")
+        local inset = Vector2.new(0, 0)
+        if gui and not gui.IgnoreGuiInset then
+            inset = GuiService:GetGuiInset()
+        end
+        local pos = btn.AbsolutePosition + btn.AbsoluteSize / 2 + inset
+        return pcall(function()
+            VIM:SendMouseButtonEvent(pos.X, pos.Y, 0, true, game, 0)
+            VIM:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 0)
+        end)
+    end
+
+    -- 讀出所有田的狀態（顯示用）
+    local function summary(gui)
+        local grow, empty, locked = 0, 0, 0
+        local scroll = gui:FindFirstChildWhichIsA("ScrollingFrame", true)
+        if not scroll then
+            return "找不到田"
+        end
+        for _, plot in ipairs(scroll:GetChildren()) do
+            if plot:IsA("TextButton") then
+                local hasTimer, isLocked = false, false
+                for _, l in ipairs(plot:GetChildren()) do
+                    if l:IsA("TextLabel") then
+                        if has(l.Text, "⏳") then hasTimer = true end
+                        if has(l.Text, "🔒") then isLocked = true end
+                    end
+                end
+                if isLocked then
+                    locked += 1
+                elseif hasTimer then
+                    grow += 1
+                else
+                    empty += 1
+                end
+            end
+        end
+        return string.format("生長中 %d｜其他 %d｜未解鎖 %d", grow, empty, locked)
+    end
+
+    local function cycle()
+        local pg = getPg()
+        local gui = pg and pg:FindFirstChild("FarmGui")
+        local main = gui and gui:FindFirstChildOfClass("Frame")
+        if not main then
+            status = "找不到 FarmGui"
+            return
+        end
+
+        -- 農場畫面沒打開就先按 FarmHud 的「農場」按鈕打開
+        local openedByMe = false
+        if not main.Visible then
+            local hud = pg:FindFirstChild("FarmHud")
+            local openBtn = hud and hud:FindFirstChild("OpenFarm")
+            if not openBtn then
+                status = "找不到農場按鈕 OpenFarm"
+                return
+            end
+            press(openBtn)
+            local t0 = tick()
+            while tick() - t0 < 3 and not main.Visible do
+                task.wait(0.1)
+            end
+            if not main.Visible then
+                status = "農場畫面打不開"
+                return
+            end
+            openedByMe = true
+            task.wait(0.5)
+        end
+
+        local did = {}
+
+        -- 有蟲就除蟲（要花 30🌸，但不除會虧更多）
+        if pestOn then
+            local b = findButton(gui, function(t) return has(t, "🐛") and not has(t, "沒蟲") end)
+            if b then
+                press(b)
+                table.insert(did, "除蟲")
+                task.wait(0.4)
+            end
+        end
+
+        -- 每日日照（今日已用的就跳過）
+        if sunOn then
+            local b = findButton(gui, function(t) return has(t, "☀") and not has(t, "已用") end)
+            if b then
+                press(b)
+                table.insert(did, "日照")
+                task.wait(0.4)
+            end
+        end
+
+        -- 全部收成（遊戲只會收成熟的）
+        if harvestOn then
+            local b = findButton(gui, function(t) return has(t, "全部收成") end)
+            if b then
+                press(b)
+                table.insert(did, "收成")
+                task.wait(0.5)
+            end
+        end
+
+        -- 重新種植：先選種子，再按全部種植（會花🌸買種子）
+        if plantOn and seedName ~= "無" then
+            local seed = findButton(gui, function(t) return has(t, seedName) and has(t, "🌸") end)
+            local plantBtn = findButton(gui, function(t) return has(t, "全部種植") end)
+            if seed and plantBtn then
+                press(seed)
+                task.wait(0.4)
+                press(plantBtn)
+                table.insert(did, "種植" .. seedName)
+                task.wait(0.5)
+            end
+        end
+
+        -- 全部澆水
+        if waterOn then
+            local b = findButton(gui, function(t) return has(t, "全部澆水") end)
+            if b then
+                press(b)
+                table.insert(did, "澆水")
+                task.wait(0.4)
+            end
+        end
+
+        status = summary(gui) .. "｜" .. (#did > 0 and table.concat(did, "、") or "沒有動作")
+
+        -- 只關回自己打開的畫面（用 X 按鈕）
+        if openedByMe and closeAfter then
+            local x = findButton(gui, function(t) return t == "X" end)
+            if x then
+                press(x)
+            end
+        end
+    end
+
+    task.spawn(function()
+        while true do
+            if farmOn then
+                local ok, err = pcall(cycle)
+                if not ok then
+                    status = "錯誤：" .. tostring(err)
+                    warn("[卡依腳本] 小農場錯誤：" .. tostring(err))
+                end
+                local waited = 0
+                while farmOn and waited < farmInterval do
+                    task.wait(0.5)
+                    waited += 0.5
+                end
+            else
+                task.wait(0.5)
+            end
+        end
+    end)
+
+    AfkTab:CreateToggle({
+        Name = "自動小農場",
+        CurrentValue = false,
+        Callback = function(v)
+            farmOn = v
+            if v then
+                status = "啟動中…"
+            end
+        end,
+    })
+    -- 不存檔：避免下次載入設定時一啟動就自己開始花🌸
+
+    AfkTab:CreateToggle({
+        Name = "自動收成", CurrentValue = true,
+        Callback = function(v) harvestOn = v end,
+    })
+    AfkTab:CreateToggle({
+        Name = "自動重新種植（會花🌸）", CurrentValue = false,
+        Callback = function(v) plantOn = v end,
+    })
+
+    local dSeed = AfkTab:CreateDropdown({
+        Name = "種植的種子",
+        Options = SEEDS,
+        CurrentOption = {seedName},
+        Callback = function(opt)
+            local s = type(opt) == "table" and opt[1] or opt
+            for _, n in ipairs(SEEDS) do
+                if n == s then
+                    seedName = s
+                end
+            end
+        end,
+    })
+    regDropdown("farmSeed", dSeed, function() return seedName end, function(v)
+        seedName = v
+    end)
+
+    AfkTab:CreateToggle({
+        Name = "自動澆水", CurrentValue = true,
+        Callback = function(v) waterOn = v end,
+    })
+    AfkTab:CreateToggle({
+        Name = "自動除蟲（每次 30🌸）", CurrentValue = true,
+        Callback = function(v) pestOn = v end,
+    })
+    AfkTab:CreateToggle({
+        Name = "自動每日日照", CurrentValue = true,
+        Callback = function(v) sunOn = v end,
+    })
+    AfkTab:CreateToggle({
+        Name = "操作完把農場畫面關回去", CurrentValue = true,
+        Callback = function(v) closeAfter = v end,
+    })
+
+    local iFarmInterval = AfkTab:CreateInput({
+        Name = "農場檢查間隔（秒）",
+        PlaceholderText = "預設 60",
+        Callback = function(text)
+            local n = tonumber(text)
+            if n and n >= 5 then
+                farmInterval = n
+                notify("已設定", "每 " .. n .. " 秒檢查一次農場")
+            else
+                notify("輸入錯誤", "請輸入 5 以上的數字")
+            end
+        end,
+    })
+    regNumber("farmInterval", iFarmInterval, function() return farmInterval end, function(v)
+        farmInterval = v
+    end)
+
+    -- 顯示目前狀態（點一下可以複製）
+    local statusBtn = AfkTab:CreateButton({
+        Name = "農場狀態  --",
+        Callback = function()
+            if setclipboard then
+                pcall(setclipboard, status)
+            end
+            notify("農場狀態", status, 4)
+        end,
+    })
+    task.spawn(function()
+        while true do
+            statusBtn:SetName("農場狀態  " .. status)
+            task.wait(0.5)
+        end
+    end)
+
+    UI:OnClose(function()
+        farmOn = false
+    end)
+end
+
+-- ====================================================================
+--  悠閒釣魚自動化
+--  做法：讀取 FishingGui 畫面上的文字和進度條，用空白鍵（或按鈕事件）
+--  模擬「按住 / 放開」。不會自己打開釣魚畫面，請先把畫面打開
+-- ====================================================================
+local AfkTab = FishTab
+AfkTab:CreateSection("悠閒釣魚")
+
+do
+    local VIM = game:GetService("VirtualInputManager")
+    local RunService = game:GetService("RunService")
+    local GuiService = game:GetService("GuiService")
+
+    local DEPTHS = {"淺水", "中水", "深水"}
+    local METHODS = {"空白鍵", "按鈕事件"}
+
+    local fishOn = false
+    local depthName = "淺水"
+    local method = "空白鍵"
+    local margin = 0.08          -- 張力安全邊界：越大越保守（越早放線）
+    local status = "--"
+
+    local cache = {}
+    local holding = false
+    local lastState, stateSince, lastAct, doneTries = "", tick(), 0, 0
+    local toggleHandle
+
+    local function has(t, s)
+        return t ~= nil and t:find(s, 1, true) ~= nil
+    end
+    local function valid(o)
+        return o ~= nil and o.Parent ~= nil
+    end
+
+    local function shown(obj)
+        local cur = obj
+        while cur do
+            if cur:IsA("GuiObject") and not cur.Visible then
+                return false
+            end
+            if cur:IsA("ScreenGui") then
+                return cur.Enabled
+            end
+            cur = cur.Parent
+        end
+        return false
+    end
+
+    local function getGui()
+        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+        return pg and pg:FindFirstChild("FishingGui")
+    end
+
+    local function findLabel(gui, pred)
+        for _, v in ipairs(gui:GetDescendants()) do
+            if v:IsA("TextLabel") and pred(v.Text) then
+                return v
+            end
+        end
+    end
+
+    -- 畫面中間那顆大按鈕（文字會隨階段改變）
+    local function getBtn(gui)
+        if valid(cache.btn) then
+            return cache.btn
+        end
+        for _, v in ipairs(gui:GetDescendants()) do
+            if v:IsA("TextButton") and v.Text ~= "✕" and v.Size.X.Offset > 200 then
+                cache.btn = v
+                return v
+            end
+        end
+    end
+
+    -- 上方提示文字（🎣 按住按鈕蓄力… / ❗ 上鉤了！… / 🐟 魚在衝刺！… 等）
+    local PHASE_WORDS = {"蓄力", "拋竿", "等待魚", "上鉤", "用力", "收線", "發力", "衝刺", "收穫", "嚇跑"}
+    local function isPhase(t)
+        if t == "" or has(t, "空白鍵") then
+            return false
+        end
+        for _, w in ipairs(PHASE_WORDS) do
+            if has(t, w) then
+                return true
+            end
+        end
+        return false
+    end
+    local function phaseText(gui)
+        local l = cache.lbl
+        if valid(l) and isPhase(l.Text) then
+            return l.Text
+        end
+        l = findLabel(gui, isPhase)
+        cache.lbl = l
+        return l and l.Text or nil
+    end
+
+    -- 在一條進度條裡找那個 5px 寬的白色指針
+    local function findMarker(bar)
+        for _, c in ipairs(bar:GetChildren()) do
+            if c:IsA("Frame") and c.Size.X.Scale == 0 and c.Size.X.Offset == 5 then
+                return c
+            end
+        end
+    end
+
+    -- 拋竿距離條（淺水/中水/深水）
+    local function castInfo(gui)
+        local c = cache.cast
+        if not (c and c.name == depthName and valid(c.marker) and valid(c.zone)) then
+            local lbl = findLabel(gui, function(t) return t == depthName end)
+            local zone = lbl and lbl.Parent
+            local bar = zone and zone.Parent
+            local marker = bar and findMarker(bar)
+            if not marker then
+                cache.cast = nil
+                return
+            end
+            c = {name = depthName, marker = marker, zone = zone}
+            cache.cast = c
+        end
+        local zs, zw = c.zone.Position.X.Scale, c.zone.Size.X.Scale
+        return c.marker.Position.X.Scale, zs + zw * 0.2, zs + zw * 0.8
+    end
+
+    -- 張力條：指針位置 + 黃色區域起點
+    local function tensionInfo(gui)
+        local t = cache.tension
+        if not (t and valid(t.marker) and valid(t.bar)) then
+            local lbl = findLabel(gui, function(s) return has(s, "TENSION") end)
+            local bar = lbl and lbl.Parent
+            local marker = bar and findMarker(bar)
+            if not marker then
+                cache.tension = nil
+                return
+            end
+            t = {marker = marker, bar = bar}
+            cache.tension = t
+        end
+        local yellow = 0.6
+        for _, c in ipairs(t.bar:GetChildren()) do
+            if c:IsA("Frame") and c.Size.X.Scale > 0.05 then
+                local col = c.BackgroundColor3
+                if col.R > 0.85 and col.G > 0.7 and col.B < 0.45 then
+                    yellow = c.Position.X.Scale
+                end
+            end
+        end
+        return t.marker.Position.X.Scale, yellow
+    end
+
+    -- 收線進度（藍色「拉近距離」條）
+    local function progress(gui)
+        local d = cache.dist
+        if not (d and valid(d)) then
+            local lbl = findLabel(gui, function(s) return has(s, "拉近距離") end)
+            local bar = lbl and lbl.Parent
+            d = bar and bar:FindFirstChildWhichIsA("Frame")
+            cache.dist = d
+        end
+        return d and d.Size.X.Scale or nil
+    end
+
+    -- 今日釣獲 x / y
+    local function dailyCount(gui)
+        local l = cache.daily
+        if not valid(l) then
+            l = findLabel(gui, function(s) return has(s, "今日釣獲") end)
+            cache.daily = l
+        end
+        if l then
+            local a, b = l.Text:match("(%d+)%s*/%s*(%d+)")
+            if a then
+                return tonumber(a), tonumber(b)
+            end
+        end
+    end
+
+    -- ===== 輸入 =====
+    local function center(btn)
+        local g = btn:FindFirstAncestorWhichIsA("ScreenGui")
+        local inset = Vector2.new(0, 0)
+        if g and not g.IgnoreGuiInset then
+            inset = GuiService:GetGuiInset()
+        end
+        return btn.AbsolutePosition + btn.AbsoluteSize / 2 + inset
+    end
+
+    local function fireSignal(btn, names)
+        if not getconnections then
+            return false
+        end
+        for _, n in ipairs(names) do
+            local ok, conns = pcall(getconnections, btn[n])
+            if ok and conns and #conns > 0 then
+                for _, c in ipairs(conns) do
+                    pcall(function() c:Fire() end)
+                end
+                return true
+            end
+        end
+        return false
+    end
+
+    local function setHold(down)
+        if holding == down then
+            return
+        end
+        holding = down
+        local btn = cache.btn
+        if method == "空白鍵" or not valid(btn) then
+            VIM:SendKeyEvent(down, Enum.KeyCode.Space, false, game)
+        else
+            if not fireSignal(btn, {down and "MouseButton1Down" or "MouseButton1Up"}) then
+                local p = center(btn)
+                VIM:SendMouseButtonEvent(p.X, p.Y, 0, down, game, 0)
+            end
+        end
+    end
+
+    local function tap()
+        setHold(true)
+        task.delay(0.08, function()
+            setHold(false)
+        end)
+    end
+
+    local function click(btn)
+        if not fireSignal(btn, {"Activated", "MouseButton1Click"}) then
+            local p = center(btn)
+            VIM:SendMouseButtonEvent(p.X, p.Y, 0, true, game, 0)
+            VIM:SendMouseButtonEvent(p.X, p.Y, 0, false, game, 0)
+        end
+    end
+
+    local function stopSelf(msg)
+        fishOn = false
+        setHold(false)
+        status = msg
+        if notify then
+            notify("自動釣魚", msg, 5)
+        end
+        if toggleHandle then
+            pcall(function() toggleHandle:Set(false) end)
+        end
+    end
+
+    -- ===== 主流程：依按鈕文字判斷目前階段 =====
+    local function step()
+        local gui = getGui()
+        local btn = gui and getBtn(gui)
+        if not btn or not shown(btn) then
+            setHold(false)
+            status = "請先打開釣魚畫面"
+            return
+        end
+
+        local bt = btn.Text
+        local lt = phaseText(gui)
+        local now = tick()
+
+        local state
+        if has(bt, "按住蓄力") then state = "IDLE"
+        elseif has(bt, "放開拋竿") then state = "CHARGE"
+        elseif has(bt, "收回魚線") then state = "WAIT"
+        elseif has(bt, "收竿") then state = "BITE"
+        elseif has(bt, "按住收線") then state = "FIGHT"
+        elseif has(bt, "再釣") then state = "DONE"
+        elseif bt == "..." then state = "BUSY"
+        else state = "UNKNOWN" end
+
+        if state ~= lastState then
+            lastState, stateSince, lastAct, doneTries = state, now, 0, 0
+        end
+
+        -- 今日上限（只在要開始新的一輪時檢查）
+        if state == "IDLE" or state == "DONE" then
+            local used, cap = dailyCount(gui)
+            if used and cap and used >= cap then
+                stopSelf("今日釣獲已達上限 " .. used .. " / " .. cap)
+                return
+            end
+        end
+
+        if state == "IDLE" then
+            if not holding and now - lastAct > 0.3 then
+                setHold(true)
+                lastAct = now
+            elseif holding and now - lastAct > 1.5 then
+                setHold(false)      -- 按住沒有生效，放開重來
+                lastAct = now
+            end
+            status = "準備拋竿"
+
+        elseif state == "CHARGE" then
+            local x, lo, hi = castInfo(gui)
+            if holding then
+                if x and x >= lo and x <= hi then
+                    setHold(false)
+                elseif now - stateSince > 4 then
+                    setHold(false)
+                end
+            end
+            status = string.format("蓄力中 %.2f（目標 %s %.2f~%.2f）", x or -1, depthName, lo or 0, hi or 0)
+
+        elseif state == "BUSY" then
+            setHold(false)
+            status = "處理中…"
+
+        elseif state == "WAIT" then
+            setHold(false)
+            status = "等待魚上鉤…"
+
+        elseif state == "BITE" then
+            if now - lastAct > 0.8 then
+                tap()
+                lastAct = now
+            end
+            status = "上鉤！收竿"
+
+        elseif state == "FIGHT" then
+            local x, yellow = tensionInfo(gui)
+            local upper = (yellow or 0.6) - margin
+            local lower = math.max(0.05, upper - 0.2)
+            if has(lt, "衝刺") then
+                setHold(false)
+            elseif has(lt, "發力") then
+                if x and x > lower * 0.5 then
+                    setHold(false)
+                else
+                    setHold(true)
+                end
+            elseif x == nil then
+                setHold(true)
+            elseif x >= upper then
+                setHold(false)
+            elseif x <= lower then
+                setHold(true)
+            end
+            local p = progress(gui)
+            status = string.format("收線中 張力 %.2f（上限 %.2f）進度 %s%s",
+                x or -1, upper, p and string.format("%.0f%%", p * 100) or "--",
+                holding and " 拉" or " 放")
+
+        elseif state == "DONE" then
+            setHold(false)
+            if now - stateSince > 1.5 and now - lastAct > 2 then
+                doneTries += 1
+                if doneTries % 2 == 1 then
+                    click(btn)
+                else
+                    fireSignal(btn, {"MouseButton1Down"})
+                    fireSignal(btn, {"MouseButton1Up"})
+                end
+                lastAct = now
+            end
+            status = "釣到了，準備再釣"
+
+        else
+            setHold(false)
+            status = "未知按鈕文字：" .. tostring(bt)
+        end
+    end
+
+    local conn = RunService.Heartbeat:Connect(function()
+        if not fishOn then
+            return
+        end
+        local ok, err = pcall(step)
+        if not ok then
+            status = "錯誤：" .. tostring(err)
+        end
+    end)
+
+    toggleHandle = AfkTab:CreateToggle({
+        Name = "自動釣魚",
+        CurrentValue = false,
+        Callback = function(v)
+            fishOn = v
+            if v then
+                status = "啟動中…"
+            else
+                setHold(false)
+            end
+        end,
+    })
+    -- 不存檔：避免下次載入設定時一啟動就自己開始釣
+
+    local dDepth = AfkTab:CreateDropdown({
+        Name = "拋竿深度（越深魚越稀有但越難）",
+        Options = DEPTHS,
+        CurrentOption = {depthName},
+        Callback = function(opt)
+            local s = type(opt) == "table" and opt[1] or opt
+            for _, n in ipairs(DEPTHS) do
+                if n == s then
+                    depthName = s
+                end
+            end
+        end,
+    })
+    regDropdown("fishDepth", dDepth, function() return depthName end, function(v)
+        depthName = v
+    end)
+
+    local dMethod = AfkTab:CreateDropdown({
+        Name = "操作方式（空白鍵沒反應就換按鈕事件）",
+        Options = METHODS,
+        CurrentOption = {method},
+        Callback = function(opt)
+            local s = type(opt) == "table" and opt[1] or opt
+            for _, n in ipairs(METHODS) do
+                if n == s then
+                    setHold(false)
+                    method = s
+                end
+            end
+        end,
+    })
+    regDropdown("fishMethod", dMethod, function() return method end, function(v)
+        method = v
+    end)
+
+    local iMargin = AfkTab:CreateInput({
+        Name = "張力安全邊界（0.02~0.3，越大越保守）",
+        PlaceholderText = "預設 0.08",
+        Callback = function(text)
+            local n = tonumber(text)
+            if n and n >= 0.02 and n <= 0.3 then
+                margin = n
+                notify("已設定", "張力邊界 " .. n)
+            else
+                notify("輸入錯誤", "請輸入 0.02 到 0.3 的數字")
+            end
+        end,
+    })
+    regNumber("fishMargin", iMargin, function() return margin end, function(v)
+        margin = v
+    end)
+
+    local statusBtn = AfkTab:CreateButton({
+        Name = "釣魚狀態  --",
+        Callback = function()
+            if setclipboard then
+                pcall(setclipboard, status)
+            end
+            notify("釣魚狀態", status, 4)
+        end,
+    })
+    task.spawn(function()
+        while true do
+            statusBtn:SetName("釣魚狀態  " .. status)
+            task.wait(0.3)
+        end
+    end)
+
+    UI:OnClose(function()
+        fishOn = false
+        setHold(false)
+        conn:Disconnect()
+    end)
+end
+
+-- ====================================================================
+--  熔岩攀爬 自動攀爬 第三版
+--
+--  這版的重點：平台是實心的（會撞頭、會撞側邊），所以每一跳都先在腳本裡
+--  模擬一遍軌跡 —— 角色矩形 vs 所有平台、鋸刃、移動平台 —— 挑一個
+--  「不會撞到、而且會落在目標平台上」的起跳位置、蓄力時間和方向。
+--  實際跳的時候，如果空中可以轉向，還會在爬升階段先停住水平移動，
+--  等高過目標平台再飄進去。
+--
+--  已測量：角色 18×24、平台厚 12、走路 75px/s、最高跳 72px
+--  邊跳邊學：水平速度、空中能不能轉向、高度係數
+-- ====================================================================
+local AfkTab = LavaTab
+AfkTab:CreateSection("熔岩攀爬")
+
+do
+    local VIM = game:GetService("VirtualInputManager")
+    local RunService = game:GetService("RunService")
+    local GuiService = game:GetService("GuiService")
+
+    local PW, PH = 18, 24             -- 角色寬高
+    local PLAT_T = 12                 -- 平台厚度
+    local G_UP, G_DOWN = 1200, 1050   -- 上升 / 下降重力 px/s²
+    local SAW_MIN, SAW_MAX = 0, 464
+
+    local climbOn = false
+    local method = "鍵盤"
+    local autoRetry = true
+    local status = "--"
+    local logBuf = {}
+    local runStart = tick()
+    local toggleHandle
+
+    local lvl
+    local ps = {x = 0, feet = 0, h = PH, still = 0, vx = 0, vy = 0}
+    local ended = false
+    local keyDown = {}
+
+    local vxAir = 110                 -- 跳躍時的水平速度（邊跳邊學）
+    local rcorr = 1.0                 -- 實際跳躍高度 / 預期高度
+    local airLocked = nil             -- true=起跳後方向鎖定；false=空中可轉向
+
+    local function has(t, s)
+        return t ~= nil and t:find(s, 1, true) ~= nil
+    end
+    local function valid(o)
+        return o ~= nil and o.Parent ~= nil
+    end
+    local function shown(obj)
+        local cur = obj
+        while cur do
+            if cur:IsA("GuiObject") and not cur.Visible then return false end
+            if cur:IsA("ScreenGui") then return cur.Enabled end
+            cur = cur.Parent
+        end
+        return false
+    end
+    local function blog(s)
+        table.insert(logBuf, string.format("[%.1f] %s", tick() - runStart, s))
+        if #logBuf > 500 then table.remove(logBuf, 1) end
+    end
+    local function getGui()
+        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+        return pg and pg:FindFirstChild("LavaJumpGui")
+    end
+
+    -- ===== 輸入 =====
+    local KEYS = {L = Enum.KeyCode.A, R = Enum.KeyCode.D, UP = Enum.KeyCode.Space}
+    local SYM = {L = "◀", R = "▶", UP = "▲"}
+
+    local function center(btn)
+        local g = btn:FindFirstAncestorWhichIsA("ScreenGui")
+        local inset = Vector2.new(0, 0)
+        if g and not g.IgnoreGuiInset then
+            inset = GuiService:GetGuiInset()
+        end
+        return btn.AbsolutePosition + btn.AbsoluteSize / 2 + inset
+    end
+
+    local function click(btn)
+        if getconnections then
+            for _, sig in ipairs({btn.Activated, btn.MouseButton1Click}) do
+                local ok, conns = pcall(getconnections, sig)
+                if ok and conns and #conns > 0 then
+                    for _, c in ipairs(conns) do
+                        pcall(function() c:Fire() end)
+                    end
+                    return
+                end
+            end
+        end
+        local p = center(btn)
+        VIM:SendMouseButtonEvent(p.X, p.Y, 0, true, game, 0)
+        VIM:SendMouseButtonEvent(p.X, p.Y, 0, false, game, 0)
+    end
+
+    local function findSymBtn(name)
+        local g = getGui()
+        if not g then return end
+        for _, v in ipairs(g:GetDescendants()) do
+            if v:IsA("TextButton") and v.Text == SYM[name] then
+                return v
+            end
+        end
+    end
+
+    local function setKey(name, down)
+        if keyDown[name] == down then
+            return
+        end
+        keyDown[name] = down
+        if method == "鍵盤" then
+            VIM:SendKeyEvent(down, KEYS[name], false, game)
+        else
+            local b = findSymBtn(name)
+            if b then
+                local p = center(b)
+                VIM:SendMouseButtonEvent(p.X, p.Y, 0, down, game, 0)
+            end
+        end
+    end
+    local function releaseAll()
+        setKey("L", false)
+        setKey("R", false)
+        setKey("UP", false)
+    end
+
+    -- ===== 找遊戲物件 =====
+    local function failShown(g)
+        for _, d in ipairs(g:GetDescendants()) do
+            if d:IsA("TextLabel") and has(d.Text, "挑戰失敗") and shown(d) then
+                return true
+            end
+        end
+        return false
+    end
+
+    local function locate()
+        local g = getGui()
+        if not g then return end
+        local giveUp
+        for _, v in ipairs(g:GetDescendants()) do
+            if v:IsA("TextButton") and v.Text == "放棄" then
+                giveUp = v
+                break
+            end
+        end
+        if not giveUp or not shown(giveUp) then return end
+        local vw = giveUp.Parent
+        for _, d in ipairs(vw:GetChildren()) do
+            if d:IsA("TextLabel") and has(d.Text, "生成今日賽道") and shown(d) then
+                return
+            end
+        end
+        if failShown(g) then return end
+        local w, best = nil, -1
+        for _, c in ipairs(vw:GetChildren()) do
+            if c:IsA("GuiObject") then
+                local n = #c:GetDescendants()
+                if n > best then w, best = c, n end
+            end
+        end
+        if not w or best < 100 then return end
+        local pl, lv
+        for _, c in ipairs(w:GetChildren()) do
+            if c:IsA("Frame") then
+                if c.Size.X.Offset == PW and c.Size.Y.Offset == PH then pl = c end
+                if c.Size.Y.Offset == 3000 then lv = c end
+            end
+        end
+        if pl and lv then
+            return vw, w, pl, lv, giveUp
+        end
+    end
+
+    local function buildLevel(world, player, lava)
+        local plats, saws = {}, {}
+        for _, c in ipairs(world:GetChildren()) do
+            if c:IsA("Frame") and c ~= player and c ~= lava then
+                local sx, sy = c.Size.X.Offset, c.Size.Y.Offset
+                local lbl = c:FindFirstChildWhichIsA("TextLabel", true)
+                local txt = lbl and lbl.Text or ""
+                if sy == PLAT_T and sx >= 40 and sx <= 140 then
+                    local P = {fr = c, w = sx, top = c.Position.Y.Offset, txt = txt, lastX = c.Position.X.Offset, v = 0}
+                    if has(txt, "⇄") then P.kind = "move"
+                    elseif has(txt, "▲") then P.kind = "spike"; P.lbl = lbl
+                    elseif has(txt, "🚩") then P.kind = "goal"
+                    elseif has(txt, "┈") then P.kind = "crumble"
+                    else
+                        local col = c.BackgroundColor3
+                        if col.B > col.R * 1.35 and col.G > col.R * 1.3 and col.B > 0.6 then
+                            P.kind = "ice"
+                        else
+                            P.kind = "normal"
+                        end
+                    end
+                    table.insert(plats, P)
+                elseif sx == 16 and sy == 16 and has(txt, "✱") then
+                    table.insert(saws, {fr = c, y = c.Position.Y.Offset, lastX = c.Position.X.Offset, v = 0})
+                elseif sx == 480 and sy == 600 then
+                    table.insert(plats, {fr = c, w = 480, top = c.Position.Y.Offset, txt = "", kind = "ground", lastX = 0, v = 0})
+                end
+            end
+        end
+        table.sort(plats, function(a, b) return a.top > b.top end)   -- 由低到高
+        return plats, saws
+    end
+
+    local function platX(P)
+        return P.fr.Position.X.Offset
+    end
+
+    -- ===== 每幀更新角色 / 鋸刃 / 移動平台速度 =====
+    local lastBeat, checkT = tick(), 0
+    local conn = RunService.Heartbeat:Connect(function()
+        local now = tick()
+        local dt = math.max(now - lastBeat, 1e-3)
+        lastBeat = now
+        if not lvl or not valid(lvl.player) then
+            return
+        end
+        local pl = lvl.player
+        local x = pl.Position.X.Offset
+        local h = pl.Size.Y.Offset
+        local feet = pl.Position.Y.Offset + h
+        if math.abs(feet - ps.feet) < 0.6 then ps.still += 1 else ps.still = 0 end
+        ps.vy = (feet - ps.feet) / dt
+        ps.vx = (x - ps.x) / dt
+        ps.x, ps.feet, ps.h = x, feet, h
+
+        for _, s in ipairs(lvl.saws) do
+            local sx = s.fr.Position.X.Offset
+            s.v = s.v * 0.8 + ((sx - s.lastX) / dt) * 0.2
+            s.lastX = sx
+        end
+        for _, P in ipairs(lvl.plats) do
+            if P.kind == "move" then
+                local px = P.fr.Position.X.Offset
+                P.v = P.v * 0.8 + ((px - P.lastX) / dt) * 0.2
+                P.lastX = px
+            end
+        end
+
+        checkT += dt
+        if checkT > 0.25 then
+            checkT = 0
+            local g = getGui()
+            if not g or not shown(lvl.giveUp) or failShown(g) then
+                ended = true
+            end
+        end
+    end)
+
+    local function platformUnder()
+        local best
+        for _, P in ipairs(lvl.plats) do
+            if math.abs(ps.feet - P.top) <= 2.5 then
+                local px = platX(P)
+                if ps.x + PW > px + 1 and ps.x < px + P.w - 1 then
+                    if not best or P.top < best.top then best = P end
+                end
+            end
+        end
+        return best
+    end
+    local function grounded()
+        return ps.still >= 3 and platformUnder() ~= nil
+    end
+    local function waitGrounded(timeout)
+        local t = tick()
+        while climbOn and not ended and tick() - t < timeout do
+            if grounded() then
+                return platformUnder()
+            end
+            RunService.Heartbeat:Wait()
+        end
+    end
+
+    -- ===== 物理模型 =====
+    local function riseBase(c)
+        return math.clamp(45 + 135 * (c - 0.17), 20, 72)
+    end
+    local function chargeFor(R)
+        local need = math.min(R / rcorr, 72)
+        if need >= 71 then
+            return 0.42
+        end
+        return math.clamp(0.17 + (need - 45) / 135, 0.03, 0.42)
+    end
+    local function riseAt(t, ap)
+        local v0 = math.sqrt(2 * G_UP * ap)
+        local tUp = v0 / G_UP
+        if t <= tUp then
+            return v0 * t - 0.5 * G_UP * t * t
+        end
+        return ap - 0.5 * G_DOWN * (t - tUp) ^ 2
+    end
+    local function landTime(H, ap)
+        local v0 = math.sqrt(2 * G_UP * ap)
+        return v0 / G_UP + math.sqrt(2 * math.max(ap - H, 0) / G_DOWN)
+    end
+
+    local function sawX(s, t)
+        local span = SAW_MAX - SAW_MIN
+        local rel = (s.lastX + s.v * t - SAW_MIN) % (2 * span)
+        if rel > span then rel = 2 * span - rel end
+        return SAW_MIN + rel
+    end
+
+    -- 玩家左緣 x 的安全範圍（完全站在平台上，並避開尖刺）
+    local function safeRanges(P)
+        local x0 = platX(P)
+        local lo, hi = x0 + 2, x0 + P.w - PW - 2
+        if hi < lo then
+            lo = x0 + P.w / 2 - PW / 2
+            hi = lo
+        end
+        local list = {{lo, hi}}
+        if P.kind == "spike" and valid(P.lbl) then
+            local sc = lvl.scale
+            local relL = (P.lbl.AbsolutePosition.X - P.fr.AbsolutePosition.X) / sc
+            local sw = P.lbl.AbsoluteSize.X / sc
+            local zl, zh = x0 + relL - PW + 2, x0 + relL + sw - 2
+            local out = {}
+            for _, r in ipairs(list) do
+                if zh < r[1] or zl > r[2] then
+                    table.insert(out, r)
+                else
+                    if zl - 1 >= r[1] then table.insert(out, {r[1], zl - 1}) end
+                    if zh + 1 <= r[2] then table.insert(out, {zh + 1, r[2]}) end
+                end
+            end
+            if #out > 0 then list = out end
+        end
+        return list
+    end
+
+    -- 模擬一跳：回傳 成功?, 落在 B 上的重疊像素, 與 B 的最小水平間距
+    local function simulate(A, B, xl, dir, c, ap, vx, dynamic)
+        local H = A.top - B.top
+        local tL = landTime(H, ap)
+        local near = {}
+        for _, P in ipairs(lvl.plats) do
+            if P ~= A and P ~= B and P.top < A.top + 30 and P.top > A.top - ap - 40 then
+                table.insert(near, P)
+            end
+        end
+        local margin = math.huge
+        for t = 0.02, tL - 0.01, 0.02 do
+            local x = math.clamp(xl + dir * vx * t, 0, 462)
+            local f = A.top - riseAt(t, ap)
+
+            -- 目標平台（實心）：爬升到它的高度之前，水平上不能重疊
+            local bx = platX(B) + ((dynamic and B.kind == "move") and B.v * (c + t) or 0)
+            if f > B.top - 1 and f - PH < B.top + PLAT_T + 3 then
+                local gap = math.max(bx - (x + PW), x - (bx + B.w))
+                if gap < 1.5 then
+                    return false
+                end
+                margin = math.min(margin, gap)
+            end
+
+            -- 其他平台
+            for _, P in ipairs(near) do
+                local px = platX(P) + ((dynamic and P.kind == "move") and P.v * (c + t) or 0)
+                if x + PW > px + 1 and x < px + P.w - 1 then
+                    if f > P.top + 1 and f - PH < P.top + PLAT_T - 1 then
+                        return false
+                    end
+                end
+            end
+
+            -- 鋸刃
+            if dynamic then
+                for _, s in ipairs(lvl.saws) do
+                    if f + 2 > s.y and f - PH - 2 < s.y + 16 then
+                        local sx = sawX(s, c + t)
+                        if sx + 16 + 4 > x and sx - 4 < x + PW then
+                            return false
+                        end
+                    end
+                end
+            end
+        end
+        local xL = math.clamp(xl + dir * vx * tL, 0, 462)
+        local bxL = platX(B) + ((dynamic and B.kind == "move") and B.v * (c + tL) or 0)
+        local ov = math.min(xL + PW, bxL + B.w) - math.max(xL, bxL)
+        return true, ov, margin
+    end
+
+    -- 規劃：在 A 上找一個起跳位置 + 蓄力 + 方向，讓模擬結果不撞、且落在 B
+    local function planJump(A, B, fixedXl, dynamic, triedList, relax)
+        local H = A.top - B.top
+        local vx = math.clamp(vxAir, 60, 220)
+        local cs = {}
+        local c = chargeFor(H + 7)
+        while c < 0.42 do
+            table.insert(cs, c)
+            c += 0.05
+        end
+        table.insert(cs, 0.42)
+
+        local xls = {}
+        if fixedXl then
+            xls = {fixedXl}
+        else
+            for _, r in ipairs(safeRanges(A)) do
+                local x = r[1]
+                while x < r[2] do
+                    table.insert(xls, x)
+                    x += 4
+                end
+                table.insert(xls, r[2])
+            end
+        end
+
+        local best
+        for _, xl in ipairs(xls) do
+            for _, dir in ipairs({1, -1, 0}) do
+                for _, cc in ipairs(cs) do
+                    local ap = riseBase(cc) * rcorr
+                    if ap >= H + 3 then
+                        local ok, ov, margin = simulate(A, B, xl, dir, cc, ap, vx, dynamic)
+                        if ok and ov >= (relax and 3 or 8) then
+                            local m = margin == math.huge and 10 or margin
+                            local score = math.abs(ps.x - xl) * 0.05 + cc * 3 - math.min(m, 10) * 0.8 - math.min(ov, 25) * 0.1
+                            for _, t in ipairs(triedList or {}) do
+                                if t.dir == dir and math.abs(t.xl - xl) < 6 and math.abs(t.c - cc) < 0.03 then
+                                    score += 30
+                                end
+                            end
+                            if not best or score < best.score then
+                                best = {xl = xl, dir = dir, c = cc, ap = ap, ov = ov, margin = m, score = score,
+                                        T = landTime(H, ap)}
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        return best
+    end
+
+    local function walkTo(A, ofs)
+        local t = tick()
+        while climbOn and not ended and tick() - t < 6 do
+            local dx = platX(A) + ofs - ps.x
+            if math.abs(dx) <= 2 then break end
+            setKey(dx > 0 and "L" or "R", false)
+            setKey(dx > 0 and "R" or "L", true)
+            RunService.Heartbeat:Wait()
+        end
+        setKey("L", false)
+        setKey("R", false)
+        local t2 = tick()
+        while ps.still < 3 and tick() - t2 < 0.5 do
+            RunService.Heartbeat:Wait()
+        end
+    end
+
+    local function lavaGap()
+        return valid(lvl.lava) and (lvl.lava.Position.Y.Offset - ps.feet) or 0
+    end
+    local function setStatus(prefix, idx)
+        status = string.format("%s｜平台 %d/%d｜高 %d m｜岩漿距腳 %d｜vx=%.0f 高度係數=%.2f %s",
+            prefix, idx or 0, #lvl.plats, math.floor(-ps.feet / 10), lavaGap(), vxAir, rcorr,
+            airLocked == nil and "" or (airLocked and "（方向鎖定）" or "（可空中轉向）"))
+    end
+
+    -- ===== 一次跳躍 =====
+    local function doJump(A, B, plan, idx)
+        local feet0 = ps.feet
+        local dir, c = plan.dir, plan.c
+        local dirKey = dir > 0 and "R" or "L"
+        local tStart = tick()
+        local takeoff, minFeet = nil, feet0
+        local dirOn, upReleased = false, false
+        local sumV, nV = 0, 0
+        local tCross, xCross, bxCross
+        local relT, relX, modeChecked = nil, nil, false
+        setKey("UP", true)
+        while climbOn and not ended do
+            RunService.Heartbeat:Wait()
+            local el = tick() - tStart
+            if dir ~= 0 and not dirOn and el >= c - 0.05 then
+                setKey(dirKey, true)
+                dirOn = true
+            end
+            if not upReleased and el >= c then
+                setKey("UP", false)
+                upReleased = true
+            end
+            if not takeoff and ps.feet < feet0 - 1.5 then
+                takeoff = tick()
+            end
+            if ps.feet < minFeet then minFeet = ps.feet end
+            if takeoff and not tCross and ps.vy >= 0 and ps.feet >= B.top - 1 and ps.feet <= B.top + 8 then
+                tCross = tick() - takeoff
+                xCross = ps.x
+                bxCross = platX(B)
+            end
+            if takeoff then
+                local ta = tick() - takeoff
+                if dirOn and keyDown[dirKey] and ta > 0.05 and ta < 0.22 then
+                    sumV += ps.vx * dir
+                    nV += 1
+                end
+                -- 空中閘門：高度還沒超過目標平台前，離它太近就先停下水平移動
+                if dirOn and airLocked ~= true then
+                    local bx = platX(B)
+                    local cleared = ps.feet <= B.top - 1
+                    local gap
+                    if dir > 0 then
+                        gap = (bx - 2) - (ps.x + PW)
+                    else
+                        gap = ps.x - (bx + B.w + 2)
+                    end
+                    local overlap = math.min(ps.x + PW, bx + B.w) - math.max(ps.x, bx)
+                    local want = cleared or gap > 5
+                    if cleared and overlap >= 14 and ps.vy > 0 then
+                        want = false
+                    end
+                    if (keyDown[dirKey] == true) ~= want then
+                        setKey(dirKey, want)
+                        if not want then
+                            relT, relX = tick(), ps.x
+                        else
+                            relT = nil
+                        end
+                    end
+                end
+                if relT and not modeChecked and tick() - relT >= 0.12 then
+                    modeChecked = true
+                    airLocked = ((ps.x - relX) * dir) > 8
+                end
+                if ta > 0.3 and ps.still >= 4 and platformUnder() then
+                    break
+                end
+            end
+            if el > 4 then break end
+        end
+        releaseAll()
+        local landed = waitGrounded(4)
+        local apexM = feet0 - minFeet
+        local airT = takeoff and (tick() - takeoff) or 0
+
+        local bumped = false
+        if takeoff then
+            if nV >= 4 then
+                local vm = sumV / nV
+                if vm > 20 then vxAir = 0.5 * vxAir + 0.5 * vm end
+            end
+            if apexM >= plan.ap - 8 then
+                rcorr = math.clamp(0.6 * rcorr + 0.4 * (apexM / riseBase(c)), 0.85, 1.15)
+            else
+                bumped = true
+            end
+        end
+        local bc = B.fr.BackgroundColor3
+        blog(string.format("#%d→#%d H=%d 蓄力%.2f 方向%d 起跳x=%d 預期上升%d 實際%d%s 滯空%.2f 落在=%s｜模擬重疊%d 間距%d｜B=%s%s 寬%d 色(%d,%d,%d)｜到B高度 t=%s 玩家x=%s B.x=%s",
+            idx, idx + 1, A.top - B.top, c, dir, plan.xl, plan.ap, apexM, bumped and "（撞頭）" or "", airT,
+            landed and (landed == B and "目標" or ("平台高度" .. -landed.top)) or "未著地",
+            plan.ov, plan.margin, B.kind, B.txt ~= "" and ("(" .. B.txt .. ")") or "", B.w,
+            bc.R * 255, bc.G * 255, bc.B * 255,
+            tCross and string.format("%.2f", tCross) or "沒到",
+            xCross and tostring(xCross) or "-", bxCross and tostring(bxCross) or "-"))
+        return takeoff ~= nil, landed
+    end
+
+    -- ===== 主迴圈 =====
+    local function indexOf(A)
+        for i, P in ipairs(lvl.plats) do
+            if P == A then return i end
+        end
+        return 0
+    end
+
+    local function climb()
+        local fails, nojump, tried = {}, 0, {}
+        while climbOn and not ended do
+            local A = waitGrounded(6)
+            if not A then
+                setStatus("等著地")
+                continue
+            end
+            if A.kind == "goal" then
+                return "goal"
+            end
+            local idx = indexOf(A)
+            local B = lvl.plats[idx + 1]
+            if not B then
+                return "goal"
+            end
+            local H = A.top - B.top
+            if H > 72 then
+                return "stuck", string.format("第 %d→%d 個平台高度差 %d 超過最大跳躍約 72，這個落差跳不上去（目標平台類型 %s）。請把狀態按鈕的紀錄貼給我",
+                    idx, idx + 1, H, B.kind)
+            end
+            if (fails[B] or 0) >= 6 then
+                return "stuck", string.format("卡在第 %d→%d 個平台（高度差 %d、目標平台類型 %s%s）。請把狀態按鈕的紀錄貼給我",
+                    idx, idx + 1, H, B.kind, B.txt ~= "" and ("，文字 " .. B.txt) or "")
+            end
+            tried[B] = tried[B] or {}
+
+            -- V7 TEST：易碎平台落地後立即起跳，優先從目前位置規劃，不再走位/等待 10 秒
+            local fastCrumble = A.kind == "crumble"
+            local fastIce = A.kind == "ice"
+            if fastIce then
+                blog(string.format("V7.1 冰面 #%d｜起點x=%.1f 即時vx=%.1f", idx, ps.x, ps.vx))
+            end
+            local plan = fastCrumble and (
+                planJump(A, B, ps.x, true, tried[B], true)
+                or planJump(A, B, ps.x, false, tried[B], true)
+            ) or nil
+            if not plan and fastIce then
+                -- 冰面優先原地起跳，避免走位時慣性滑出邊緣
+                plan = planJump(A, B, ps.x, true, tried[B], true)
+                    or planJump(A, B, ps.x, false, tried[B], true)
+            end
+            if not plan then
+                plan = planJump(A, B, nil, false, tried[B]) or planJump(A, B, nil, false, tried[B], true)
+                fastCrumble = false -- 沒有原地可行方案時回退原本路線
+                fastIce = false
+            end
+            if not plan then
+                fails[B] = (fails[B] or 0) + 1
+                blog(string.format("#%d→#%d 找不到不會撞到的跳法（第 %d 次）", idx, idx + 1, fails[B]))
+                task.wait(0.3)
+                continue
+            end
+            local plan2
+            if fastCrumble or fastIce then
+                setStatus(fastCrumble and "V7 易碎平台快速起跳" or "V7.1 冰面原地起跳", idx)
+                blog(string.format("%s #%d→#%d｜原地蓄力 %.2fs｜起跳前vx=%.1f", fastCrumble and "V7 快跳" or "V7.1 冰面", idx, idx + 1, plan.c, ps.vx))
+                plan2 = plan
+            else
+                setStatus("走到起跳點", idx)
+                walkTo(A, plan.xl - platX(A))
+                -- 一般平台仍保留原本的動態避障
+                local tw = tick()
+                while climbOn and not ended do
+                    plan2 = planJump(A, B, ps.x, true, tried[B])
+                    if plan2 or tick() - tw > 10 then break end
+                    setStatus("等空檔（鋸刃/移動平台）", idx)
+                    RunService.Heartbeat:Wait()
+                end
+                if not climbOn or ended then break end
+                plan2 = plan2 or plan
+            end
+
+            setStatus("跳躍", idx)
+            local didJump, landed = doJump(A, B, plan2, idx)
+            if not didJump then
+                nojump += 1
+                if nojump >= 3 then
+                    return "stuck", "連續 3 次按了跳躍都沒有跳起來，請把操作方式換成另一種再試"
+                end
+            else
+                nojump = 0
+                if landed ~= B and not (landed and landed.top < A.top) then
+                    fails[B] = (fails[B] or 0) + 1
+                    table.insert(tried[B], {xl = plan2.xl, dir = plan2.dir, c = plan2.c})
+                end
+            end
+            if landed and (landed.kind == "crumble" or landed.kind == "ice") then
+                RunService.Heartbeat:Wait()
+            else
+                task.wait(0.05)
+            end
+        end
+        return "ended"
+    end
+
+    -- ===== 自動導覽（結算畫面 → 回到選單 → 再次挑戰）=====
+    local lastNav = 0
+    local function autoNavigate()
+        if tick() - lastNav < 1.5 then return end
+        local g = getGui()
+        if not g then return end
+        for _, v in ipairs(g:GetDescendants()) do
+            if v:IsA("TextButton") and shown(v) then
+                local t = v.Text
+                if has(t, "回到選單") or has(t, "再次挑戰") or has(t, "開始挑戰") then
+                    lastNav = tick()
+                    click(v)
+                    return
+                end
+            end
+        end
+    end
+
+    local function stopSelf(msg)
+        climbOn = false
+        releaseAll()
+        status = msg
+        blog("停止：" .. msg)
+        if notify then
+            notify("自動攀爬", msg, 6)
+        end
+        local text = table.concat(logBuf, "\n")
+        if setclipboard then pcall(setclipboard, text) end
+        if writefile then pcall(writefile, "KaiLavaClimb.txt", text) end
+        if toggleHandle then
+            pcall(function() toggleHandle:Set(false) end)
+        end
+    end
+
+    local function runner()
+        local tries = 0
+        while climbOn do
+            status = "等待遊戲開始…"
+            local vw, world, player, lava, giveUp
+            while climbOn do
+                vw, world, player, lava, giveUp = locate()
+                if player then break end
+                if autoRetry then autoNavigate() end
+                task.wait(0.3)
+            end
+            if not climbOn then break end
+
+            ended = false
+            local plats, saws = buildLevel(world, player, lava)
+            lvl = {plats = plats, saws = saws, player = player, lava = lava, world = world, giveUp = giveUp,
+                   scale = world.AbsoluteSize.X / math.max(world.Size.X.Offset, 1)}
+            ps.feet = player.Position.Y.Offset + player.Size.Y.Offset
+            ps.still = 0
+            blog(string.format("開始：%d 個平台、%d 個鋸刃", #plats, #saws))
+            task.wait(0.5)
+
+            local res, msg = climb()
+            releaseAll()
+            if res == "goal" then
+                stopSelf("到達山頂！")
+                break
+            elseif res == "stuck" then
+                stopSelf(msg)
+                break
+            end
+            tries += 1
+            blog("這一輪結束，已重試 " .. tries .. " 次")
+            if not autoRetry or tries >= 5 then
+                stopSelf("已達重試上限或關閉自動重試")
+                break
+            end
+        end
+    end
+
+    -- ===== 介面 =====
+    toggleHandle = AfkTab:CreateToggle({
+        Name = "自動攀爬（熔岩攀爬）",
+        CurrentValue = false,
+        Callback = function(v)
+            climbOn = v
+            if v then
+                runStart = tick()
+                logBuf = {}
+                task.spawn(runner)
+            else
+                releaseAll()
+            end
+        end,
+    })
+    -- 不存檔：避免下次載入設定時自己開始跳
+
+    AfkTab:CreateToggle({
+        Name = "失敗後自動重試（最多 5 次）", CurrentValue = true,
+        Callback = function(v) autoRetry = v end,
+    })
+
+    local dMethod = AfkTab:CreateDropdown({
+        Name = "操作方式（鍵盤沒反應就換按鈕）",
+        Options = {"鍵盤", "按鈕"},
+        CurrentOption = {method},
+        Callback = function(opt)
+            local s = type(opt) == "table" and opt[1] or opt
+            if s == "鍵盤" or s == "按鈕" then
+                releaseAll()
+                method = s
+            end
+        end,
+    })
+    regDropdown("lavaMethod", dMethod, function() return method end, function(v)
+        method = v
+    end)
+
+    local statusBtn = AfkTab:CreateButton({
+        Name = "攀爬狀態  --",
+        Callback = function()
+            local text = table.concat(logBuf, "\n")
+            if setclipboard then pcall(setclipboard, text) end
+            notify("攀爬狀態", status, 4)
+        end,
+    })
+    task.spawn(function()
+        while true do
+            statusBtn:SetName("攀爬狀態  " .. status)
+            task.wait(0.3)
+        end
+    end)
+
+    UI:OnClose(function()
+        climbOn = false
+        releaseAll()
+        conn:Disconnect()
+    end)
+end
+
+-- ====================================================================
+--  21 點 Blackjack
+--
+--  做法：只讀取畫面上的牌和文字，再用「要牌 / 停牌」按鈕操作
+--  - 狀態按鈕會一直顯示建議（要牌或停牌），不開自動也能當提示用
+--  - 「自動要牌/停牌」：輪到你時自動按建議
+--  - 「自動開始下一局」：結算後自動選下注金額並按開始（有局數和餘額上限）
+--  - 策略是只有「要牌 / 停牌」可選時的基本策略。注意這個遊戲平手算莊家贏，
+--    長期期望值還是偏負，所以預設只玩 20 局就停
+-- ====================================================================
+local AfkTab = BjTab
+AfkTab:CreateSection("21 點 Blackjack")
+
+do
+    local VIM = game:GetService("VirtualInputManager")
+    local GuiService = game:GetService("GuiService")
+
+    local autoPlay, autoStart = false, false
+    local betChoice = 100
+    local maxRounds = 20
+    local stopBelow = 0
+    local rounds = 0
+    local status = "--"
+    local logBuf = {}
+    local runStart = tick()
+    local startToggle
+
+    local function has(t, s)
+        return t ~= nil and t:find(s, 1, true) ~= nil
+    end
+    local function shown(obj)
+        local cur = obj
+        while cur do
+            if cur:IsA("GuiObject") and not cur.Visible then return false end
+            if cur:IsA("ScreenGui") then return cur.Enabled end
+            cur = cur.Parent
+        end
+        return false
+    end
+    local function blog(s)
+        table.insert(logBuf, string.format("[%.1f] %s", tick() - runStart, s))
+        if #logBuf > 300 then table.remove(logBuf, 1) end
+    end
+    local function commas(n)
+        local s = tostring(math.floor(n))
+        local r = s:reverse():gsub("(%d%d%d)", "%1,"):reverse()
+        return (r:gsub("^,", ""))
+    end
+
+    local function click(btn)
+        if getconnections then
+            for _, sig in ipairs({btn.Activated, btn.MouseButton1Click}) do
+                local ok, conns = pcall(getconnections, sig)
+                if ok and conns and #conns > 0 then
+                    for _, c in ipairs(conns) do
+                        pcall(function() c:Fire() end)
+                    end
+                    return
+                end
+            end
+        end
+        local g = btn:FindFirstAncestorWhichIsA("ScreenGui")
+        local inset = Vector2.new(0, 0)
+        if g and not g.IgnoreGuiInset then
+            inset = GuiService:GetGuiInset()
+        end
+        local p = btn.AbsolutePosition + btn.AbsoluteSize / 2 + inset
+        VIM:SendMouseButtonEvent(p.X, p.Y, 0, true, game, 0)
+        VIM:SendMouseButtonEvent(p.X, p.Y, 0, false, game, 0)
+    end
+
+    local function getMain()
+        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+        local g = pg and pg:FindFirstChild("BlackjackGui")
+        local m = g and g:FindFirstChild("Main")
+        return g, m
+    end
+
+    local function findButton(main, pred)
+        for _, v in ipairs(main:GetChildren()) do
+            if v:IsA("TextButton") and pred(v.Text) then
+                return v
+            end
+        end
+    end
+
+    -- ===== 讀牌 =====
+    local SUITS = {["♠"] = true, ["♥"] = true, ["♦"] = true, ["♣"] = true}
+    local function cardRank(card)
+        for _, l in ipairs(card:GetDescendants()) do
+            if l:IsA("TextLabel") then
+                local t = l.Text
+                if t ~= "" and not SUITS[t] and t ~= "🌸" then
+                    return t
+                end
+            end
+        end
+    end
+    local function cardValue(r)
+        if r == "A" then return 11 end
+        if r == "J" or r == "Q" or r == "K" or r == "T" then return 10 end
+        return tonumber(r)
+    end
+    local function ranksOf(container)
+        local list = {}
+        for _, c in ipairs(container:GetChildren()) do
+            if c:IsA("Frame") then
+                local r = cardRank(c)
+                if r then table.insert(list, r) end
+            end
+        end
+        return list
+    end
+    local function evalHand(ranks)
+        local total, aces = 0, 0
+        for _, r in ipairs(ranks) do
+            local v = cardValue(r) or 0
+            if v == 11 then
+                aces += 1
+                total += 1
+            else
+                total += v
+            end
+        end
+        local soft = false
+        if aces > 0 and total + 10 <= 21 then
+            total += 10
+            soft = true
+        end
+        return total, soft
+    end
+
+    -- 找「莊家 ·」「你 ·」標籤後面的牌區，以及牌區後面的狀態文字
+    local function sectionCards(main, prefix)
+        local kids = main:GetChildren()
+        for i, c in ipairs(kids) do
+            if c:IsA("TextLabel") and c.Text:sub(1, #prefix) == prefix and has(c.Text, "·") then
+                for j = i + 1, #kids do
+                    if kids[j]:IsA("Frame") then
+                        return kids[j], c, j
+                    end
+                end
+            end
+        end
+    end
+    local function labelAfter(main, container)
+        local kids = main:GetChildren()
+        local after = false
+        for _, c in ipairs(kids) do
+            if after and c:IsA("TextLabel") then
+                return c
+            end
+            if c == container then after = true end
+        end
+    end
+    local function balanceOf(main)
+        for _, d in ipairs(main:GetDescendants()) do
+            if d:IsA("TextLabel") then
+                local n = d.Text:match("^🌸%s*([%d,]+)$")
+                if n then
+                    return tonumber((n:gsub(",", "")))
+                end
+            end
+        end
+    end
+
+    -- 只有「要牌 / 停牌」時的基本策略（莊家 17 停牌）
+    local function decide(total, soft, up)
+        if soft then
+            if total <= 17 then return "HIT" end
+            if total == 18 then return up <= 8 and "STAND" or "HIT" end
+            return "STAND"
+        end
+        if total <= 11 then return "HIT" end
+        if total == 12 then return (up >= 4 and up <= 6) and "STAND" or "HIT" end
+        if total <= 16 then return up <= 6 and "STAND" or "HIT" end
+        return "STAND"
+    end
+
+    local lastKey, lastAct, lastStart = "", 0, 0
+    local lastS, lastSChange, lastBal = nil, tick(), nil
+    local roundLogged = true
+
+    local function stopAuto(msg)
+        autoStart = false
+        autoPlay = false
+        status = msg
+        blog("停止：" .. msg)
+        if notify then
+            notify("21 點", msg, 5)
+        end
+        if startToggle then
+            pcall(function() startToggle:Set(false) end)
+        end
+    end
+
+    local function step()
+        local g, main = getMain()
+        if not main or not g.Enabled or not shown(main) then
+            status = "請先打開 21 點畫面"
+            return
+        end
+        local dCont = sectionCards(main, "莊家")
+        local pCont, pLbl = sectionCards(main, "你")
+        if not dCont or not pCont then
+            status = "找不到牌桌"
+            return
+        end
+        local sLbl = labelAfter(main, dCont)
+        local sText = sLbl and sLbl.Text or ""
+        local now = tick()
+
+        local pr, dr = ranksOf(pCont), ranksOf(dCont)
+        local total, soft = evalHand(pr)
+        local labelTotal = tonumber((pLbl.Text:match("(%d+)")))
+        if labelTotal and #pr > 0 and labelTotal ~= total then
+            blog(string.format("警告：算出 %d，畫面顯示 %d（牌=%s）", total, labelTotal, table.concat(pr, ",")))
+            total, soft = labelTotal, false
+        end
+        local up = dr[1] and cardValue(dr[1])
+        local turn = has(sText, "要牌還是停牌")
+        local advice = (turn and #pr >= 2 and up) and decide(total, soft, up) or nil
+        local bal = balanceOf(main)
+
+        if sText ~= lastS then
+            blog("狀態文字：" .. sText)
+            lastS, lastSChange = sText, now
+            roundLogged = false
+        end
+        if bal ~= lastBal then
+            blog("餘額 " .. (bal and commas(bal) or "?"))
+            lastBal = bal
+        end
+        if not turn and not roundLogged and now - lastSChange > 1 and #pr > 0 then
+            blog(string.format("這一局：你=%s（%d）莊家=%s", table.concat(pr, ","), total, table.concat(dr, ",")))
+            roundLogged = true
+        end
+
+        if #pr > 0 then
+            status = string.format("你 %d%s vs 莊家 %s｜%s｜局數 %d/%d｜餘額 %s",
+                total, soft and "（軟）" or "", dr[1] or "?",
+                advice and ("建議：" .. (advice == "HIT" and "要牌" or "停牌")) or sText,
+                rounds, maxRounds, bal and commas(bal) or "?")
+        else
+            status = string.format("%s｜局數 %d/%d｜餘額 %s", sText ~= "" and sText or "等待開局", rounds, maxRounds, bal and commas(bal) or "?")
+        end
+
+        -- 自動要牌 / 停牌
+        if autoPlay and turn and advice and now - lastAct > 0.8 then
+            local key = #pr .. ":" .. total
+            if key ~= lastKey or now - lastAct > 3 then
+                local b = findButton(main, function(t)
+                    return has(t, advice == "HIT" and "要牌" or "停牌")
+                end)
+                if b and shown(b) then
+                    click(b)
+                    lastKey, lastAct = key, now
+                    blog(string.format("%d%s vs %s → %s", total, soft and "軟" or "", dr[1] or "?", advice))
+                end
+            end
+        end
+
+        -- 自動開始下一局
+        if autoStart and not turn and now - lastSChange > 1.2 and now - lastStart > 3 then
+            if rounds >= maxRounds then
+                stopAuto("已達最大局數 " .. maxRounds)
+            elseif bal and (bal < stopBelow or bal < betChoice) then
+                stopAuto("餘額 " .. commas(bal) .. " 低於停止線或下注金額")
+            else
+                local startBtn = findButton(main, function(t) return has(t, "開始遊戲") end)
+                if startBtn and shown(startBtn) then
+                    if not has(startBtn.Text, commas(betChoice)) then
+                        local chip = findButton(main, function(t)
+                            return (t:gsub(",", "")) == tostring(betChoice)
+                        end)
+                        if chip then
+                            click(chip)
+                            lastStart = now - 2.4
+                        else
+                            stopAuto("找不到下注金額 " .. betChoice .. " 的籌碼")
+                        end
+                    else
+                        click(startBtn)
+                        rounds += 1
+                        lastStart = now
+                        blog("開始第 " .. rounds .. " 局，下注 " .. betChoice)
+                    end
+                end
+            end
+        end
+    end
+
+    task.spawn(function()
+        while true do
+            task.wait(0.25)
+            local ok, err = pcall(step)
+            if not ok then
+                status = "錯誤：" .. tostring(err)
+            end
+        end
+    end)
+
+    -- ===== 介面 =====
+    AfkTab:CreateToggle({
+        Name = "自動要牌/停牌（按建議）", CurrentValue = false,
+        Callback = function(v) autoPlay = v end,
+    })
+    -- 不存檔：避免下次載入設定時自己開始花🌸
+
+    startToggle = AfkTab:CreateToggle({
+        Name = "自動開始下一局（會花🌸）", CurrentValue = false,
+        Callback = function(v)
+            autoStart = v
+            if v then
+                rounds = 0
+                runStart = tick()
+            end
+        end,
+    })
+
+    local BETS = {"100", "300", "500", "1000", "2000", "3000"}
+    local dBet = AfkTab:CreateDropdown({
+        Name = "每局下注金額",
+        Options = BETS,
+        CurrentOption = {tostring(betChoice)},
+        Callback = function(opt)
+            local s = type(opt) == "table" and opt[1] or opt
+            local n = tonumber(s)
+            if n then betChoice = n end
+        end,
+    })
+    regDropdown("bjBet", dBet, function() return tostring(betChoice) end, function(v)
+        betChoice = tonumber(v) or betChoice
+    end)
+
+    local iRounds = AfkTab:CreateInput({
+        Name = "最多玩幾局（預設 20）",
+        PlaceholderText = "例如 20",
+        Callback = function(text)
+            local n = tonumber(text)
+            if n and n >= 1 then
+                maxRounds = math.floor(n)
+                notify("已設定", "最多 " .. maxRounds .. " 局")
+            else
+                notify("輸入錯誤", "請輸入 1 以上的整數")
+            end
+        end,
+    })
+    regNumber("bjRounds", iRounds, function() return maxRounds end, function(v)
+        maxRounds = v
+    end)
+
+    local iStop = AfkTab:CreateInput({
+        Name = "餘額低於多少就停止（預設 0）",
+        PlaceholderText = "例如 1000",
+        Callback = function(text)
+            local n = tonumber((text:gsub(",", "")))
+            if n and n >= 0 then
+                stopBelow = n
+                notify("已設定", "餘額低於 " .. commas(n) .. " 停止")
+            else
+                notify("輸入錯誤", "請輸入數字")
+            end
+        end,
+    })
+    regNumber("bjStopBelow", iStop, function() return stopBelow end, function(v)
+        stopBelow = v
+    end)
+
+    local statusBtn = AfkTab:CreateButton({
+        Name = "21點狀態  --",
+        Callback = function()
+            if setclipboard then
+                pcall(setclipboard, table.concat(logBuf, "\n"))
+            end
+            notify("21 點", status, 4)
+        end,
+    })
+    task.spawn(function()
+        while true do
+            statusBtn:SetName("21點狀態  " .. status)
+            task.wait(0.3)
+        end
+    end)
+
+    UI:OnClose(function()
+        autoPlay, autoStart = false, false
+    end)
+end
+
+-- ====================================================================
+--  深淵地牢 自動闖關
+--  從探測紀錄看到的結構（DungeonDelveGui）：
+--   · 地圖是 11 欄 × 7 列的格子，每格是一個 TextLabel，文字是符號（🟢 史萊姆、💰 金幣、▦ 牆壁…）
+--   · 怪物的格子底色偏紅，格子裡的小數字是怪物血量
+--   · 角色是另一個 Frame，用位置換算成第幾格
+--   · 上下左右 ▲ ▼ ◀ ▶ 是按鈕，⏳ 是原地等待；走進怪物 = 攻擊
+--   · 升級會跳出三選一的卡片；死亡會跳出「🔁 再來一局」
+--  地圖、道具、怪物每次都是隨機的，所以腳本每一步都重新讀整張地圖、重新規劃路線。
+--  規則：
+--   · 怪物貼在旁邊 → 直接清掉；怪物剛好在兩格外 → 原地等它走過來
+--   · 地刺、陷阱、傳送一律不踩；道具盡量撿，樓梯最後才去
+--   · 祭壇 🎲、禮物 🎁：血量低於一半不碰，夠的話才撿（不一定撿，太遠就不撿）
+--   · 升級能力可選力量類或血量類（防禦、格擋兩邊都算）
+-- ====================================================================
+local DungeonTab = DungeonTab or Window:CreateTab("深淵地牢")
+DungeonTab:CreateSection("深淵地牢｜自動闖關")
+
+do
+    local GuiService = game:GetService("GuiService")
+    local VIM = game:GetService("VirtualInputManager")
+
+    local alive = true
+    local botOn = false
+    local mode = "collect"           -- collect = 先撿道具再下樓；dive = 直接下樓
+    local autoRestart = false
+    local maxRuns = 3
+    local runs = 0
+    local stepDelay = 0.4
+    local pref = "atk"               -- 升級能力偏好：atk = 力量類（攻擊）、hp = 血量類（生存、復活）
+    local holdCounts, stationary = {}, {}   -- 怪物在兩格外時原地等它：每隻最多等 3 次
+    local noPlan = 0                 -- 連續找不到安全路線的次數
+    local status = "--"
+    local logBuf = {}
+    local runStart = tick()
+    local blocked, failCount = {}, {}
+    local lastFloor = 0
+    local deadHandled = false
+    local againTries = 0
+    local cache = {}
+    local toggleBot
+
+    local function blog(s)
+        table.insert(logBuf, string.format("[%.1f] %s", tick() - runStart, s))
+        if #logBuf > 800 then table.remove(logBuf, 1) end
+    end
+    local function trim(s)
+        return (tostring(s):gsub("^%s+", ""):gsub("%s+$", ""))
+    end
+    local function strip(s)
+        return (tostring(s):gsub("<[^>]+>", ""):gsub("\u{FE0F}", ""))
+    end
+    local function shown(obj)
+        local cur = obj
+        while cur do
+            if cur:IsA("GuiObject") and not cur.Visible then return false end
+            if cur:IsA("ScreenGui") then return cur.Enabled end
+            cur = cur.Parent
+        end
+        return false
+    end
+
+    -- ===== 按按鈕 =====
+    local function press(btn)
+        if getconnections then
+            for _, sig in ipairs({btn.Activated, btn.MouseButton1Click}) do
+                local ok, conns = pcall(getconnections, sig)
+                if ok and conns and #conns > 0 then
+                    for _, c in ipairs(conns) do
+                        pcall(function() c:Fire() end)
+                    end
+                    return true
+                end
+            end
+        end
+        local g = btn:FindFirstAncestorWhichIsA("ScreenGui")
+        local inset = Vector2.new(0, 0)
+        if g and not g.IgnoreGuiInset then
+            inset = GuiService:GetGuiInset()
+        end
+        local p = btn.AbsolutePosition + btn.AbsoluteSize / 2 + inset
+        return pcall(function()
+            VIM:SendMouseButtonEvent(p.X, p.Y, 0, true, game, 0)
+            VIM:SendMouseButtonEvent(p.X, p.Y, 0, false, game, 0)
+        end)
+    end
+
+    local function getGui()
+        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+        return pg and pg:FindFirstChild("DungeonDelveGui")
+    end
+
+    -- ===== 掃描介面上的文字和按鈕 =====
+    local BTN_SYM = {up = "▲", down = "▼", left = "◀", right = "▶", wait = "⏳"}
+    local LOG_TOK = {"踏入深淵", "你攻擊", "攻擊你", "撿到", "進入第", "原地等待", "擊敗", "喝下", "吃下", "落雷"}
+
+    local function scan(gui)
+        local S = {btn = {}, cards = {}}
+        for _, v in ipairs(gui:GetDescendants()) do
+            if v:IsA("TextButton") then
+                if shown(v) then
+                    local t = trim(strip(v.Text))
+                    for k, sym in pairs(BTN_SYM) do
+                        if t == sym then
+                            S.btn[k] = v
+                        end
+                    end
+                    if t:find("再來一局", 1, true) then S.again = v end
+                    if t:find("繼續遊戲", 1, true) then S.cont = v end
+                end
+            elseif v:IsA("TextLabel") then
+                local t = strip(v.Text)
+                if t ~= "" and shown(v) then
+                    if t:find("升級！選擇", 1, true) then
+                        S.levelup = v
+                    elseif t:find("你倒下了", 1, true) then
+                        S.dead = v
+                    elseif t:find("確定要放棄", 1, true) then
+                        S.confirm = v
+                    end
+                    local cur, mx = t:match("❤%s*(%d+)%s*/%s*(%d+)")
+                    if cur and not S.hp then
+                        S.hp, S.maxhp, S.hpLabel = tonumber(cur), tonumber(mx), v
+                    end
+                    local atk = t:match("攻擊%s*(%d+)")
+                    if atk and not S.atk then
+                        S.atk = tonumber(atk)
+                    end
+                    local fl = t:match("^%S+%s*第%s*(%d+)%s*層")
+                    if fl and not S.floor then
+                        S.floor = tonumber(fl)
+                    end
+                    if not S.logLabel and v.AbsoluteSize.Y > 80 then
+                        for _, tk in ipairs(LOG_TOK) do
+                            if t:find(tk, 1, true) then
+                                S.logLabel = v
+                                break
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        -- 升級卡片：標題旁邊的三個按鈕，卡片裡的文字由上到下是 圖示、名稱、說明、標籤
+        if S.levelup then
+            for _, b in ipairs(S.levelup.Parent:GetChildren()) do
+                if b:IsA("TextButton") and shown(b) then
+                    local labs = {}
+                    for _, l in ipairs(b:GetChildren()) do
+                        if l:IsA("TextLabel") then
+                            table.insert(labs, l)
+                        end
+                    end
+                    table.sort(labs, function(a, c)
+                        return a.AbsolutePosition.Y < c.AbsolutePosition.Y
+                    end)
+                    local all = {}
+                    for _, l in ipairs(labs) do
+                        table.insert(all, strip(l.Text))
+                    end
+                    table.insert(S.cards, {btn = b, name = labs[2] and strip(labs[2].Text) or "", text = table.concat(all, " ")})
+                end
+            end
+        end
+        return S
+    end
+
+    -- 能力分類：
+    --   力量類 = 攻擊、暴擊這類
+    --   血量類 = 生命、回復、吸血、復活、閃避這類（會動到血量的）
+    --   防禦類（防禦、格擋、護盾）像血量又像攻擊，兩邊都算
+    local ATK_NAME = {"蠻力", "力量", "致命", "狂戰", "暴擊", "利刃", "鋒"}
+    local HP_NAME = {"生命", "活力", "治癒", "治療", "回復", "吸血", "復活", "重生", "再生", "閃避", "堅韌", "體質"}
+    local BOTH_NAME = {"格擋", "防禦", "護盾", "盾", "鎧", "甲"}
+    local DEF_WORD = {"防禦", "減傷", "受到的傷害", "擋下", "免疫"}
+    local HP_WORD = {"最大生命", "回復", "復活", "重生", "吸血", "治療", "再生", "生命"}
+    local ATK_WORD = {"攻擊", "暴擊", "傷害"}
+    local TIE = {
+        atk = {"蠻力", "致命", "狂戰", "格擋"},
+        hp = {"復活", "重生", "生命", "格擋", "閃避"},
+    }
+
+    local function hasAny(str, list)
+        for _, w in ipairs(list) do
+            if str:find(w, 1, true) then
+                return true
+            end
+        end
+        return false
+    end
+
+    local function abilityKinds(name, text)
+        local k = {atk = false, hp = false}
+        if hasAny(name, BOTH_NAME) then
+            k.atk, k.hp = true, true
+            return k
+        end
+        if hasAny(name, ATK_NAME) then k.atk = true end
+        if hasAny(name, HP_NAME) then k.hp = true end
+        if k.atk or k.hp then
+            return k
+        end
+        -- 名稱認不出來，改看說明文字
+        if hasAny(text, DEF_WORD) then
+            k.atk, k.hp = true, true
+            return k
+        end
+        if hasAny(text, HP_WORD) then k.hp = true end
+        if hasAny(text, ATK_WORD) then k.atk = true end
+        return k
+    end
+
+    local function chooseCard(cards)
+        local other = pref == "atk" and "hp" or "atk"
+        local pool, pool2 = {}, {}
+        for _, cd in ipairs(cards) do
+            cd.kinds = abilityKinds(cd.name, cd.text)
+            if cd.kinds[pref] then
+                table.insert(pool, cd)
+            elseif cd.kinds[other] then
+                table.insert(pool2, cd)
+            end
+        end
+        local list = #pool > 0 and pool or (#pool2 > 0 and pool2 or cards)
+        local best, bi = list[1], math.huge
+        for _, cd in ipairs(list) do
+            for i, w in ipairs(TIE[pref]) do
+                if cd.name:find(w, 1, true) and i < bi then
+                    best, bi = cd, i
+                end
+            end
+        end
+        return best, #pool
+    end
+
+    -- ===== 讀地圖 =====
+    local ITEM_TOK = {
+        {"🍎", "apple"}, {"🧪", "potion"}, {"💰", "gold"}, {"💎", "gem"}, {"⚔", "sword"}, {"🛡", "shield"},
+        {"📦", "chest"}, {"🎲", "altar"}, {"🎁", "curse"}, {"🔑", "key"}, {"▼", "stairs"},
+    }
+    local BAD_TOK = {
+        {"🔺", "spike"}, {"🔥", "trap"}, {"🍄", "trap"}, {"🌀", "tele"}, {"🏪", "shop"},
+        {"🔒", "lock"}, {"⚡", "bolt"},
+    }
+    local DIRS = {{-1, 0, "up"}, {1, 0, "down"}, {0, -1, "left"}, {0, 1, "right"}}
+
+    local function classify(lbl)
+        local text = strip(lbl.Text)
+        local bg = lbl.BackgroundColor3
+        local R, G, B = bg.R * 255, bg.G * 255, bg.B * 255
+        local cell = {text = text, kind = "floor", hp = 0}
+        -- 黃色底 = 落雷預警
+        if R > 100 and G > 85 and B < 50 then
+            cell.danger = true
+        end
+        if text == "" then
+            return cell
+        end
+        if text:find("▦", 1, true) then
+            cell.kind = "wall"
+            return cell
+        end
+        -- 怪物的格子裡有一個小數字（血量）
+        local child = lbl:FindFirstChildWhichIsA("TextLabel")
+        local hp = child and tonumber(strip(child.Text):match("^%d+$") or "")
+        if hp then
+            cell.kind = "enemy"
+            cell.hp = hp
+            return cell
+        end
+        for _, p in ipairs(BAD_TOK) do
+            if text:find(p[1], 1, true) then
+                if p[2] == "bolt" then
+                    cell.danger = true
+                else
+                    cell.kind = p[2]
+                end
+                return cell
+            end
+        end
+        for _, p in ipairs(ITEM_TOK) do
+            if text:find(p[1], 1, true) then
+                cell.kind = p[2]
+                return cell
+            end
+        end
+        cell.kind = "unknown"
+        return cell
+    end
+
+    local function clusters(vals)
+        table.sort(vals)
+        local out = {}
+        for _, v in ipairs(vals) do
+            if #out == 0 or v - out[#out] > 6 then
+                table.insert(out, v)
+            end
+        end
+        return out
+    end
+    local function idxOf(list, v)
+        local best, bd = 1, math.huge
+        for i, x in ipairs(list) do
+            local d = math.abs(x - v)
+            if d < bd then
+                best, bd = i, d
+            end
+        end
+        return best
+    end
+
+    -- 找放格子的那個 Frame（底下有幾十個正方形 TextLabel）
+    local function findMap(gui)
+        if cache.map and cache.map.Parent then
+            return cache.map
+        end
+        for _, f in ipairs(gui:GetDescendants()) do
+            if f:IsA("Frame") then
+                local n = 0
+                for _, c in ipairs(f:GetChildren()) do
+                    if c:IsA("TextLabel") then
+                        local s = c.AbsoluteSize
+                        if math.abs(s.X - s.Y) < 3 and s.X > 20 then
+                            n += 1
+                        end
+                    end
+                end
+                if n >= 40 then
+                    cache.map = f
+                    return f
+                end
+            end
+        end
+        return nil
+    end
+
+    local function readState(gui)
+        local map = findMap(gui)
+        if not map then
+            return nil
+        end
+        local labels, xs, ys = {}, {}, {}
+        local cellW = 0
+        for _, c in ipairs(map:GetChildren()) do
+            if c:IsA("TextLabel") then
+                local s = c.AbsoluteSize
+                if math.abs(s.X - s.Y) < 3 and s.X > 20 then
+                    table.insert(labels, c)
+                    table.insert(xs, c.AbsolutePosition.X)
+                    table.insert(ys, c.AbsolutePosition.Y)
+                    cellW = s.X
+                end
+            end
+        end
+        if #labels < 20 then
+            return nil
+        end
+        local cx, cy = clusters(xs), clusters(ys)
+        local G = {grid = {}, rows = #cy, cols = #cx}
+        for r = 1, #cy do
+            G.grid[r] = {}
+        end
+        local blue
+        for _, lbl in ipairs(labels) do
+            local r = idxOf(cy, lbl.AbsolutePosition.Y)
+            local c = idxOf(cx, lbl.AbsolutePosition.X)
+            local cell = classify(lbl)
+            cell.cx = lbl.AbsolutePosition.X + lbl.AbsoluteSize.X / 2
+            cell.cy = lbl.AbsolutePosition.Y + lbl.AbsoluteSize.Y / 2
+            local bg = lbl.BackgroundColor3
+            if math.abs(bg.R * 255 - 34) < 6 and math.abs(bg.G * 255 - 56) < 6 and math.abs(bg.B * 255 - 90) < 6 then
+                blue = {r, c}
+            end
+            G.grid[r][c] = cell
+        end
+        -- 角色：另一個比格子小一點的 Frame，用中心點找最近的格子
+        for _, c in ipairs(map:GetChildren()) do
+            if c:IsA("Frame") and c.AbsoluteSize.X > 20 and c.AbsoluteSize.X < cellW - 2 then
+                G.pf = c
+                break
+            end
+        end
+        if G.pf then
+            local px = G.pf.AbsolutePosition.X + G.pf.AbsoluteSize.X / 2
+            local py = G.pf.AbsolutePosition.Y + G.pf.AbsoluteSize.Y / 2
+            local bd = math.huge
+            for r = 1, G.rows do
+                for c = 1, G.cols do
+                    local cell = G.grid[r][c]
+                    if cell then
+                        local d = (cell.cx - px) ^ 2 + (cell.cy - py) ^ 2
+                        if d < bd then
+                            bd = d
+                            G.pr, G.pc = r, c
+                        end
+                    end
+                end
+            end
+        end
+        if not G.pr and blue then
+            G.pr, G.pc = blue[1], blue[2]
+        end
+        if not G.pr then
+            return nil
+        end
+        -- 角色腳下那格當作空地（保留落雷預警）
+        local under = G.grid[G.pr][G.pc]
+        G.grid[G.pr][G.pc] = {text = "", kind = "floor", hp = 0, danger = under.danger, cx = under.cx, cy = under.cy}
+        return G
+    end
+
+    -- ===== 規劃 =====
+    local ITEMKIND = {apple = true, potion = true, gold = true, gem = true, sword = true, shield = true,
+        chest = true, altar = true, curse = true, key = true, stairs = true}
+    local OPTIONAL = {altar = true, curse = true}     -- 祭壇、禮物：不一定要撿，血量夠、而且很近才去
+
+    local function countAdjE(G, r, c)
+        local n = 0
+        for _, d in ipairs(DIRS) do
+            local row = G.grid[r + d[1]]
+            local g = row and row[c + d[2]]
+            if g and g.kind == "enemy" then
+                n += 1
+            end
+        end
+        return n
+    end
+
+    local function planPath(G, S)
+        local grid, R, C = G.grid, G.rows, G.cols
+        local pr, pc = G.pr, G.pc
+        local atk = math.max(S.atk or 2, 1)
+        local hp, maxhp = S.hp or 1, S.maxhp or 1
+        local halfOk = hp * 2 >= maxhp      -- 血量有沒有到一半（祭壇、禮物要看這個）
+
+        local function enter(r, c)
+            if blocked[r .. "," .. c] then return nil end
+            local g = grid[r] and grid[r][c]
+            if not g then return nil end
+            local k = g.kind
+            -- 牆、地刺、陷阱、傳送、商人、鎖箱：一律不走
+            if k == "wall" or k == "unknown" or k == "shop" or k == "lock"
+                or k == "spike" or k == "trap" or k == "tele" then
+                return nil
+            end
+            local cost = 1
+            if k == "enemy" then
+                cost = 1 + math.ceil(g.hp / atk) * 1.5
+            elseif k == "altar" or k == "curse" then
+                -- 血量低於一半就不碰；夠的話可以走，但沒要撿就盡量別踩到
+                if not halfOk then return nil end
+                cost = 8
+            end
+            if g.danger then cost += 20 end
+            cost += countAdjE(G, r, c) * 1.2
+            return cost
+        end
+
+        local function key(r, c)
+            return (r - 1) * C + c
+        end
+        local startK = key(pr, pc)
+        local dist, prev, done = {[startK] = 0}, {}, {}
+        while true do
+            local bu, bd
+            for k, d in pairs(dist) do
+                if not done[k] and (not bd or d < bd) then
+                    bu, bd = k, d
+                end
+            end
+            if not bu then break end
+            done[bu] = true
+            local r = math.floor((bu - 1) / C) + 1
+            local c = (bu - 1) % C + 1
+            for _, d in ipairs(DIRS) do
+                local rr, cc = r + d[1], c + d[2]
+                if rr >= 1 and rr <= R and cc >= 1 and cc <= C then
+                    local w = enter(rr, cc)
+                    if w then
+                        local k2 = key(rr, cc)
+                        local nd = bd + w
+                        if not dist[k2] or nd < dist[k2] then
+                            dist[k2] = nd
+                            prev[k2] = bu
+                        end
+                    end
+                end
+            end
+        end
+
+        -- 每種東西值多少分（藥水只有在缺血時才撿）
+        local missing = maxhp - hp
+        local V = {
+            apple = 14, gold = 6, gem = 10, sword = 16, shield = 16, chest = 9, key = 4, altar = 6, curse = 4,
+            potion = missing >= 1 and (hp <= maxhp * 0.5 and 30 or (missing >= 3 and 14 or 6)) or nil,
+        }
+
+        local cand, stairs = {}, nil
+        for r = 1, R do
+            for c = 1, C do
+                local g = grid[r][c]
+                local d = g and dist[key(r, c)]
+                if g and d and (r ~= pr or c ~= pc) then
+                    if g.kind == "stairs" then
+                        if not stairs or d < stairs.dist then
+                            stairs = {r = r, c = c, kind = "stairs", dist = d, score = 0}
+                        end
+                    elseif ITEMKIND[g.kind] and V[g.kind] and not (OPTIONAL[g.kind] and d > 8) then
+                        table.insert(cand, {r = r, c = c, kind = g.kind, dist = d, score = V[g.kind] - d * 0.3})
+                    end
+                end
+            end
+        end
+        local topItem
+        for _, t in ipairs(cand) do
+            if not topItem or t.score > topItem.score then
+                topItem = t
+            end
+        end
+        local best
+        if mode == "dive" then
+            best = stairs or topItem
+        else
+            best = topItem or stairs      -- 收集：道具撿完才去樓梯
+        end
+        if not best then
+            return nil
+        end
+
+        local cur = key(best.r, best.c)
+        local guard = 0
+        while prev[cur] and prev[cur] ~= startK and guard < 200 do
+            cur = prev[cur]
+            guard += 1
+        end
+        if not prev[cur] then
+            return nil
+        end
+        local rr = math.floor((cur - 1) / C) + 1
+        local cc = (cur - 1) % C + 1
+        local dir
+        if rr < pr then
+            dir = "up"
+        elseif rr > pr then
+            dir = "down"
+        elseif cc < pc then
+            dir = "left"
+        else
+            dir = "right"
+        end
+        return {dir = dir, r = rr, c = cc, target = best,
+            why = string.format("前往 %s (%d,%d) 距離 %.1f", best.kind, best.r, best.c, best.dist)}
+    end
+
+    -- 找距離剛好兩格（上下左右各算一格）的怪物
+    local function findNear2(G)
+        for r = 1, G.rows do
+            for c = 1, G.cols do
+                local g = G.grid[r][c]
+                if g and g.kind == "enemy" and math.abs(r - G.pr) + math.abs(c - G.pc) == 2 then
+                    local k = r .. "," .. c
+                    if not stationary[k] then
+                        return k
+                    end
+                end
+            end
+        end
+        return nil
+    end
+
+    -- commit = true 才會更新「等怪物」的計數（預覽時不會）
+    local function decide(G, S, commit)
+        local pr, pc = G.pr, G.pc
+        local here = G.grid[pr][pc]
+        local plan = planPath(G, S)
+
+        -- 1. 站在落雷預警上，先離開
+        if here.danger then
+            local bestN, bestS
+            for _, d in ipairs(DIRS) do
+                local rr, cc = pr + d[1], pc + d[2]
+                local row = G.grid[rr]
+                local g = row and row[cc]
+                if g and not g.danger and not blocked[rr .. "," .. cc]
+                    and (g.kind == "floor" or ITEMKIND[g.kind]) then
+                    local sc = countAdjE(G, rr, cc) * 2
+                    if plan then
+                        sc += (math.abs(rr - plan.target.r) + math.abs(cc - plan.target.c)) * 0.1
+                    end
+                    if not bestS or sc < bestS then
+                        bestN, bestS = {dir = d[3], r = rr, c = cc, why = "離開落雷預警"}, sc
+                    end
+                end
+            end
+            if bestN then
+                return bestN
+            end
+        end
+
+        -- 2. 怪物已經貼在旁邊：直接清掉（先打血量最少的）
+        local weakest
+        for _, d in ipairs(DIRS) do
+            local rr, cc = pr + d[1], pc + d[2]
+            local row = G.grid[rr]
+            local g = row and row[cc]
+            if g and g.kind == "enemy" and (not weakest or g.hp < weakest.hp) then
+                weakest = {dir = d[3], r = rr, c = cc, hp = g.hp}
+            end
+        end
+        if weakest then
+            weakest.why = "清掉旁邊的怪物 hp=" .. weakest.hp
+            return weakest
+        end
+
+        -- 3. 怪物剛好在兩格外：待在原地，等它自己走過來再打
+        local near2 = findNear2(G)
+        if near2 then
+            local n = (holdCounts[near2] or 0) + 1
+            if commit then
+                holdCounts[near2] = n
+            end
+            if n <= 3 then
+                return {dir = "wait", why = "怪物在兩格外，原地等它過來（" .. n .. "/3）"}
+            end
+            if commit then
+                stationary[near2] = true
+                blog("怪物 (" .. near2 .. ") 好像不會靠過來，不再等它")
+            end
+        end
+
+        if plan then
+            return plan
+        end
+        return {dir = "wait", why = "沒有安全的路線，原地等待", noPlan = true}
+    end
+
+    -- ===== 偵錯：把地圖印成文字 =====
+    local function dumpGrid(G, S)
+        local SYM = {floor = ".", wall = "#", enemy = "E", apple = "a", potion = "p", gold = "g", gem = "G",
+            sword = "s", shield = "d", chest = "c", altar = "A", key = "k", stairs = ">", spike = "^",
+            trap = "x", tele = "@", shop = "$", lock = "L", curse = "!", unknown = "?"}
+        blog(string.format("---- 地圖 %d 列 × %d 欄｜血量 %s/%s 攻擊 %s 第 %s 層｜P=角色 *=落雷預警 ----",
+            G.rows, G.cols, tostring(S.hp), tostring(S.maxhp), tostring(S.atk), tostring(S.floor)))
+        local enemies = {}
+        for r = 1, G.rows do
+            local line = {}
+            for c = 1, G.cols do
+                local g = G.grid[r][c]
+                local ch = "?"
+                if r == G.pr and c == G.pc then
+                    ch = "P"
+                elseif g then
+                    ch = SYM[g.kind] or "?"
+                    if g.danger and g.kind == "floor" then ch = "*" end
+                    if g.kind == "enemy" then
+                        table.insert(enemies, string.format("(%d,%d)%s hp=%d", r, c, g.text, g.hp))
+                    end
+                end
+                table.insert(line, ch)
+            end
+            blog(table.concat(line, " "))
+        end
+        if #enemies > 0 then
+            blog("怪物：" .. table.concat(enemies, "　"))
+        end
+    end
+
+    local function sigOf(S, G)
+        local p = G.pf and (G.pf.AbsolutePosition.X .. "," .. G.pf.AbsolutePosition.Y) or ""
+        return (S.hpLabel and S.hpLabel.Text or "") .. "|" .. (S.logLabel and S.logLabel.Text or "") .. "|" .. p
+    end
+
+    local function stopBot(msg)
+        botOn = false
+        status = msg
+        blog("停止：" .. msg)
+        notify("深淵地牢", msg, 5)
+        if toggleBot then
+            pcall(function() toggleBot:Set(false) end)
+        end
+    end
+
+    -- ===== 主流程：一次一步 =====
+    local function tickBot()
+        local gui = getGui()
+        if not gui then
+            status = "找不到 DungeonDelveGui"
+            return
+        end
+        local S = scan(gui)
+
+        if S.dead then
+            if not deadHandled then
+                deadHandled = true
+                runs += 1
+                local sum = ""
+                for _, l in ipairs(S.dead.Parent:GetChildren()) do
+                    if l:IsA("TextLabel") and l ~= S.dead then
+                        sum = sum .. " " .. strip(l.Text):gsub("%s+", " ")
+                    end
+                end
+                blog("倒下了（第 " .. runs .. " 局）：" .. sum)
+            end
+            if autoRestart and runs < maxRuns then
+                againTries += 1
+                if S.again and againTries <= 5 then
+                    blog("按「再來一局」")
+                    task.wait(1)
+                    press(S.again)
+                    task.wait(1.5)
+                end
+            elseif autoRestart then
+                stopBot("已打完 " .. runs .. " 局")
+            else
+                stopBot("倒下了，已停止（沒開「死後自動再來一局」）")
+            end
+            return
+        end
+        deadHandled = false
+        againTries = 0
+
+        if S.confirm and S.cont then
+            blog("放棄視窗被打開了，按「繼續遊戲」")
+            press(S.cont)
+            task.wait(0.6)
+            return
+        end
+
+        if S.levelup and #S.cards > 0 then
+            local cd, fit = chooseCard(S.cards)
+            blog("升級：選 " .. cd.name .. "（偏好" .. (pref == "atk" and "力量類" or "血量類")
+                .. "，符合的有 " .. fit .. " 張 / 共 " .. #S.cards .. " 張）")
+            task.wait(0.5)
+            press(cd.btn)
+            task.wait(0.9)
+            return
+        end
+
+        if not S.hp then
+            status = "讀不到血量（還沒進遊戲？）"
+            return
+        end
+        local G = readState(gui)
+        if not G then
+            status = "讀不到地圖"
+            return
+        end
+        if S.floor and S.floor ~= lastFloor then
+            lastFloor = S.floor
+            blocked, failCount = {}, {}
+            holdCounts, stationary = {}, {}
+            noPlan = 0
+            blog("進入第 " .. S.floor .. " 層")
+        end
+
+        local act = decide(G, S, true)
+        if act.noPlan then
+            noPlan += 1
+            if noPlan >= 8 then
+                stopBot("沒有安全的路線（可能被地刺、陷阱或牆擋住了），已停止")
+                return
+            end
+        else
+            noPlan = 0
+        end
+        local btn = S.btn[act.dir]
+        if not btn then
+            status = "找不到按鈕 " .. tostring(act.dir)
+            return
+        end
+        status = string.format("第 %s 層 ❤%d/%d 位置(%d,%d) → %s", tostring(S.floor), S.hp, S.maxhp, G.pr, G.pc, act.why)
+        blog(string.format("(%d,%d) ❤%d/%d %s：%s", G.pr, G.pc, S.hp, S.maxhp, act.dir, act.why))
+
+        local before = sigOf(S, G)
+        press(btn)
+        local changed = false
+        local t0 = tick()
+        while tick() - t0 < 1.6 do
+            task.wait(0.06)
+            if sigOf(S, G) ~= before then
+                changed = true
+                break
+            end
+        end
+        if act.r then
+            local k = act.r .. "," .. act.c
+            if changed then
+                failCount[k] = nil
+            else
+                failCount[k] = (failCount[k] or 0) + 1
+                if failCount[k] >= 2 then
+                    blocked[k] = true
+                    blog("這一格走不進去，先當成障礙：(" .. k .. ")")
+                end
+            end
+        end
+        task.wait(stepDelay)
+    end
+
+    task.spawn(function()
+        while alive do
+            if botOn then
+                local ok, err = pcall(tickBot)
+                if not ok then
+                    status = "錯誤：" .. tostring(err)
+                    blog("錯誤：" .. tostring(err))
+                    task.wait(1)
+                end
+            end
+            task.wait(0.15)
+        end
+    end)
+
+    -- ===== 介面 =====
+    toggleBot = DungeonTab:CreateToggle({
+        Name = "自動闖關",
+        CurrentValue = false,
+        Callback = function(v)
+            botOn = v
+            if v then
+                runs = 0
+                runStart = tick()
+                blocked, failCount = {}, {}
+                holdCounts, stationary = {}, {}
+                noPlan = 0
+                lastFloor = 0
+                blog("---- 開始自動闖關 ----")
+            end
+        end,
+    })
+
+    local MODES = {"收集（先撿道具再下樓）", "推進（直接下樓）"}
+    DungeonTab:CreateDropdown({
+        Name = "策略",
+        Options = MODES,
+        CurrentOption = {MODES[1]},
+        Callback = function(opt)
+            local s = type(opt) == "table" and opt[1] or opt
+            mode = tostring(s):find("推進", 1, true) and "dive" or "collect"
+        end,
+    })
+
+    DungeonTab:CreateToggle({
+        Name = "死後自動再來一局",
+        CurrentValue = false,
+        Callback = function(v)
+            autoRestart = v
+        end,
+    })
+
+    DungeonTab:CreateInput({
+        Name = "最多連續玩幾局（預設 3）",
+        PlaceholderText = "例如 3",
+        Callback = function(text)
+            local n = tonumber(text)
+            if n and n >= 1 then
+                maxRuns = math.floor(n)
+                notify("已設定", "最多 " .. maxRuns .. " 局")
+            else
+                notify("輸入錯誤", "請輸入 1 以上的整數")
+            end
+        end,
+    })
+
+    DungeonTab:CreateInput({
+        Name = "每一步的間隔（秒，預設 0.4）",
+        PlaceholderText = "太快可能被遊戲忽略",
+        Callback = function(text)
+            local n = tonumber(text)
+            if n and n >= 0.1 and n <= 3 then
+                stepDelay = n
+                notify("已設定", "間隔 " .. n .. " 秒")
+            else
+                notify("輸入錯誤", "請輸入 0.1~3 的數字")
+            end
+        end,
+    })
+
+    local PREFS = {"力量類（攻擊）", "血量類（生存、復活）"}
+    DungeonTab:CreateDropdown({
+        Name = "升級能力偏好（防禦、格擋兩邊都算）",
+        Options = PREFS,
+        CurrentOption = {PREFS[1]},
+        Callback = function(opt)
+            local s2 = type(opt) == "table" and opt[1] or opt
+            pref = tostring(s2):find("血量", 1, true) and "hp" or "atk"
+        end,
+    })
+
+    DungeonTab:CreateSection("偵錯（先用這兩個確認判讀正確再開自動）")
+
+    DungeonTab:CreateButton({
+        Name = "判讀目前地圖（印成文字）",
+        Callback = function()
+            local gui = getGui()
+            local S = gui and scan(gui)
+            local G = gui and readState(gui)
+            if S and G then
+                dumpGrid(G, S)
+                notify("深淵地牢", "地圖已記入紀錄，按「複製全部紀錄」貼給我", 4)
+            else
+                notify("深淵地牢", "讀不到地圖，請先進入遊戲", 4)
+            end
+        end,
+    })
+
+    DungeonTab:CreateButton({
+        Name = "預覽下一步（不會動作）",
+        Callback = function()
+            local gui = getGui()
+            local S = gui and scan(gui)
+            local G = gui and S and S.hp and readState(gui)
+            if S and G then
+                local act = decide(G, S, false)
+                blog(string.format("預覽：(%d,%d) ❤%d/%d → %s：%s", G.pr, G.pc, S.hp, S.maxhp, act.dir, act.why))
+                notify("預覽下一步", act.dir .. "：" .. act.why, 5)
+            else
+                notify("深淵地牢", "讀不到地圖，請先進入遊戲", 4)
+            end
+        end,
+    })
+
+    DungeonTab:CreateButton({
+        Name = "複製全部紀錄",
+        Callback = function()
+            local text = table.concat(logBuf, "\n")
+            if setclipboard then pcall(setclipboard, text) end
+            if writefile then pcall(writefile, "KaiDungeonBot.txt", text) end
+            notify("深淵地牢", "已複製 " .. #logBuf .. " 行紀錄", 4)
+        end,
+    })
+
+    DungeonTab:CreateButton({
+        Name = "清除紀錄",
+        Callback = function()
+            logBuf = {}
+            runStart = tick()
+            notify("深淵地牢", "紀錄已清除", 2)
+        end,
+    })
+
+    local statusBtn = DungeonTab:CreateButton({
+        Name = "狀態  --",
+        Callback = function()
+            notify("深淵地牢", status, 5)
+        end,
+    })
+    task.spawn(function()
+        while alive do
+            statusBtn:SetName("狀態  " .. status)
+            task.wait(0.5)
+        end
+    end)
+
+    UI:OnClose(function()
+        alive = false
+        botOn = false
+    end)
+end
+
+-- ===== 設定 =====
+SetTab:CreateSection("設定")
+
+SetTab:CreateButton({
+    Name = "儲存設定",
+    Callback = function()
+        saveConfig()
+    end,
+})
+
+SetTab:CreateButton({
+    Name = "載入設定",
+    Callback = function()
+        loadConfig(false)
+    end,
+})
+
+SetTab:CreateButton({
+    Name = "刪除設定（連按兩次確認）",
+    Callback = function()
+        deleteConfig()
+    end,
+})
+
+SetTab:CreateButton({
+    Name = "隱藏視窗（會出現可拖曳的小按鈕）",
+    Callback = function()
+        UI:SetVisibility(false)
+    end,
+})
+
+-- 對外：讓主腳本的按鈕可以重新叫出這個視窗
+local alive = true
+UI:OnClose(function()
+    alive = false
+end)
+env.KaiSakuraAFK = {
+    alive = function() return alive end,
+    show = function() UI:SetVisibility(true) end,
+}
+
+-- 啟動時自動套用上次存的設定
+loadConfig(true)
+
+notify("櫻 mini game AFK", "載入完成", 3)
