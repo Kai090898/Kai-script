@@ -1290,6 +1290,38 @@ local function ugcRefresh()
     end
 end
 UGCTab:CreateButton({Name="立即刷新今日 UGC",Callback=ugcRefresh})
+UGCTab:CreateButton({Name="UGC 診斷｜複製介面資料",Callback=function()
+    local pg=LocalPlayer:FindFirstChild("PlayerGui")
+    if not pg then notify("UGC 診斷","找不到 PlayerGui",5);return end
+    local lines={"UGC 診斷｜請在遊戲中打開 UGC 任務後按此按鈕"}
+    local count=0
+    for _,root in ipairs(pg:GetChildren()) do
+        if root:IsA("LayerCollector") then
+            local hits={}
+            for _,o in ipairs(root:GetDescendants()) do
+                if (o:IsA("TextLabel") or o:IsA("TextButton")) and
+                    (o.Name=="TankName" or o.Name=="UGCName" or o.Name=="Availability" or
+                     o.Name=="1Name" or o.Name=="1Value" or o.Name=="2Name" or o.Name=="2Value" or
+                     o.Name=="3Name" or o.Name=="3Value") then
+                    table.insert(hits,o.Name.."="..o.Text.." [visible="..tostring(ugcVisible(o,pg)).."]")
+                end
+            end
+            if #hits>0 then
+                count=count+1
+                table.insert(lines,root.Name.." [enabled="..tostring(root.Enabled).."]")
+                for _,hit in ipairs(hits) do table.insert(lines,"  "..hit) end
+            end
+        end
+    end
+    table.insert(lines,"找到的 UGC 資料根數："..count)
+    local report=table.concat(lines,"\n")
+    if setclipboard then
+        local ok=pcall(setclipboard,report)
+        notify("UGC 診斷",ok and "診斷報告已複製，請貼回聊天" or "複製失敗，請查看日誌",6)
+    else notify("UGC 診斷","執行環境不支援剪貼簿，請查看日誌",6) end
+    for line in report:gmatch("[^\n]+") do blog(line) end
+end})
+
 task.spawn(function()
     while task.wait(8) do
         if alive ~= false then pcall(ugcRefresh) else break end
