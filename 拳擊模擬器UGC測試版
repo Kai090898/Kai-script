@@ -1256,23 +1256,33 @@ end
 local function ugcRefresh()
     local pg=LocalPlayer:FindFirstChild("PlayerGui")
     if not pg then return end
-    local selected
-    -- 只使用玩家目前開啟的獎勵頁面，避免把昨天的 NEW 標籤誤判成今日
-    for _,key in ipairs({"SummerQuest","AxolotlQuest","UGCNextBoss2","UGCVisitsPlaytimeQuest"}) do
-        local root=pg:FindFirstChild(key)
-        if root and ugcVisible(root,pg) then selected=root;break end
+    -- 讀取當前正在顯示的 UGC 任務，不以 NEW 或日期推測
+    local selected,score=nil,-1
+    for _,root in ipairs(pg:GetChildren()) do
+        if root:IsA("ScreenGui") and root.Enabled then
+            for _,candidate in ipairs({root}) do
+                local name=ugcText(candidate,"TankName") or ugcText(candidate,"UGCName")
+                local stock=ugcText(candidate,"Availability")
+                local task=ugcText(candidate,"1Name")
+                if name and (stock or task) then
+                    local rank=(stock and 2 or 0)+(task and 2 or 0)
+                    if candidate.Name=="SummerQuest" or candidate.Name=="AxolotlQuest" then rank=rank+1 end
+                    if rank>score then selected=candidate;score=rank end
+                end
+            end
+        end
     end
     if not selected then
-        ugcName:SetName("今日 UGC：尚未選擇")
+        ugcName:SetName("目前 UGC：尚未偵測到")
         ugcStock:SetName("庫存：未知")
-        ugcStatus:SetName("請在遊戲中開啟今日獎勵頁面")
+        ugcStatus:SetName("請在遊戲中開啟 UGC 任務介面")
         for i=1,3 do ugcTasks[i]:SetName("任務 "..i.."：—") end
         return
     end
     local item=ugcText(selected,"TankName") or ugcText(selected,"UGCName") or selected.Name
-    ugcName:SetName("目前查看："..item)
+    ugcName:SetName("目前 UGC："..item)
     ugcStock:SetName("庫存："..(ugcText(selected,"Availability") or "未知"))
-    ugcStatus:SetName("來源：目前開啟頁面（上架日期未驗證）")
+    ugcStatus:SetName("來源："..selected.Name.."（遊戲介面數值）")
     for i=1,3 do
         local name=ugcText(selected,i.."Name")
         local value=ugcText(selected,i.."Value")
