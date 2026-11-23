@@ -1233,129 +1233,56 @@ do
     })
 end
 
--- ===== 今日 UGC：遊戲 UI 即時監看（只讀） =====
-UGCTab:CreateSection("今日 UGC｜自動刷新，不含倒數")
-local ugcOverlay, ugcText, ugcLast = nil, nil, ""
-local function ugcRead()
-    local pg=LocalPlayer:FindFirstChild("PlayerGui")
-    if not pg then return "找不到 PlayerGui" end
-    local roots={"UniqueQuest","UniqueQuest2","SummerQuest","AxolotlQuest","UGCNextBoss2","UGCVisitsPlaytimeQuest"}
-    local function getText(root,key)
-        local o=root:FindFirstChild(key,true)
-        if o and (o:IsA("TextLabel") or o:IsA("TextButton")) then return o.Text end
-        return nil
+-- ===== 今日 UGC：直接顯示於卡依 UI 分頁，不建立額外視窗 =====
+UGCTab:CreateSection("今日 UGC｜目前遊戲開啟的獎勵")
+local ugcName=UGCTab:CreateSection("等待偵測今日 UGC")
+local ugcStock=UGCTab:CreateSection("庫存：未知")
+local ugcStatus=UGCTab:CreateSection("請先在遊戲中打開今日 UGC 頁面")
+local ugcTasks={}
+for i=1,3 do ugcTasks[i]=UGCTab:CreateSection("任務 "..i.."：—") end
+local function ugcVisible(obj,pg)
+    while obj and obj~=pg do
+        if obj:IsA("GuiObject") and not obj.Visible then return false end
+        if obj:IsA("ScreenGui") and not obj.Enabled then return false end
+        obj=obj.Parent
     end
-    local entries={}
-    for _,key in ipairs(roots) do
-        local root=pg:FindFirstChild(key,true)
-        if root then
-            local item=getText(root,"TankName") or getText(root,"UGCName")
-            local stock=getText(root,"Availability")
-            local tasks={}
-            for i=1,3 do
-                local name=getText(root,i.."Name")
-                if name then
-                    table.insert(tasks,"  "..name.."  "..(getText(root,i.."Value") or "?"))
-                end
-            end
-            if item or stock or #tasks>0 then
-                local badge=root:FindFirstChild("TextLabel",true)
-                local newTag=false
-                for _,o in ipairs(root:GetDescendants()) do
-                    if o:IsA("TextLabel") and o.Text:lower():find("new",1,true) then newTag=true;break end
-                end
-                table.insert(entries,{name=item or key,stock=stock or "未知",tasks=tasks,tag=newTag,key=key})
-            end
-        end
-    end
-    local lines={"今日 UGC｜UI 監看","上架時間不固定；不顯示倒數","庫存為遊戲 UI 原始值，隱藏頁面可能尚未更新",""}
-    local foundToday=false
-    for _,e in ipairs(entries) do
-        if e.tag then
-            foundToday=true
-            table.insert(lines,"[NEW 標記候選] "..e.name.."｜"..e.stock)
-            for _,t in ipairs(e.tasks) do table.insert(lines,t) end
-        end
-    end
-    if not foundToday then table.insert(lines,"尚未辨識今日新品（NEW 不代表已驗證上架日期）") end
-    table.insert(lines,"")
-    table.insert(lines,"其他已讀取的 UGC：")
-    for _,e in ipairs(entries) do
-        if not e.tag then
-            table.insert(lines,e.name.."｜庫存 "..e.stock)
-            for _,t in ipairs(e.tasks) do table.insert(lines,t) end
-        end
-    end
-    if #entries==0 then table.insert(lines,"尚未取得 UGC 資料") end
-    return table.concat(lines,"\n")
+    return true
+end
+local function ugcText(root,key)
+    local obj=root:FindFirstChild(key,true)
+    if obj and (obj:IsA("TextLabel") or obj:IsA("TextButton")) then return obj.Text end
+    return nil
 end
 local function ugcRefresh()
-    ugcLast=ugcRead()
-    if ugcText and ugcText.Parent then
-        ugcText.Text=ugcLast
-        local n=1
-        for _ in ugcLast:gmatch("\n") do n=n+1 end
-        ugcText.Size=UDim2.new(1,-14,0,math.max(320,n*18))
-        ugcText.Parent.CanvasSize=UDim2.fromOffset(0,math.max(320,n*18))
-    end
-end
-local function ugcOpen()
-    if ugcOverlay and ugcOverlay.Parent then ugcOverlay.Enabled=true;ugcRefresh();return end
     local pg=LocalPlayer:FindFirstChild("PlayerGui")
     if not pg then return end
-    ugcOverlay=Instance.new("ScreenGui")
-    ugcOverlay.Name="KaiTodayUGCMonitor"
-    ugcOverlay.ResetOnSpawn=false
-    ugcOverlay.DisplayOrder=110
-    ugcOverlay.Parent=pg
-    local panel=Instance.new("Frame")
-    panel.Size=UDim2.fromOffset(440,390)
-    panel.Position=UDim2.new(.5,-220,.5,-195)
-    panel.BackgroundColor3=Color3.fromRGB(24,30,42)
-    panel.Parent=ugcOverlay
-    local close=Instance.new("TextButton")
-    close.Size=UDim2.fromOffset(80,34)
-    close.Position=UDim2.new(1,-88,0,7)
-    close.Text="關閉"
-    close.TextColor3=Color3.new(1,1,1)
-    close.BackgroundColor3=Color3.fromRGB(60,90,130)
-    close.Parent=panel
-    close.MouseButton1Click:Connect(function()ugcOverlay.Enabled=false end)
-    local refresh=Instance.new("TextButton")
-    refresh.Size=UDim2.fromOffset(110,34)
-    refresh.Position=UDim2.fromOffset(8,7)
-    refresh.Text="立即刷新"
-    refresh.TextColor3=Color3.new(1,1,1)
-    refresh.BackgroundColor3=Color3.fromRGB(60,90,130)
-    refresh.Parent=panel
-    refresh.MouseButton1Click:Connect(ugcRefresh)
-    local scroll=Instance.new("ScrollingFrame")
-    scroll.Position=UDim2.fromOffset(8,48)
-    scroll.Size=UDim2.new(1,-16,1,-56)
-    scroll.BackgroundTransparency=1
-    scroll.ScrollBarThickness=6
-    scroll.Parent=panel
-    ugcText=Instance.new("TextLabel")
-    ugcText.BackgroundTransparency=1
-    ugcText.Size=UDim2.new(1,-14,0,320)
-    ugcText.TextXAlignment=Enum.TextXAlignment.Left
-    ugcText.TextYAlignment=Enum.TextYAlignment.Top
-    ugcText.TextWrapped=true
-    ugcText.Font=Enum.Font.Code
-    ugcText.TextSize=14
-    ugcText.TextColor3=Color3.new(1,1,1)
-    ugcText.Parent=scroll
-    ugcRefresh()
+    local selected
+    -- 只使用玩家目前開啟的獎勵頁面，避免把昨天的 NEW 標籤誤判成今日
+    for _,key in ipairs({"SummerQuest","AxolotlQuest","UGCNextBoss2","UGCVisitsPlaytimeQuest"}) do
+        local root=pg:FindFirstChild(key)
+        if root and ugcVisible(root,pg) then selected=root;break end
+    end
+    if not selected then
+        ugcName:SetName("今日 UGC：尚未選擇")
+        ugcStock:SetName("庫存：未知")
+        ugcStatus:SetName("請在遊戲中開啟今日獎勵頁面")
+        for i=1,3 do ugcTasks[i]:SetName("任務 "..i.."：—") end
+        return
+    end
+    local item=ugcText(selected,"TankName") or ugcText(selected,"UGCName") or selected.Name
+    ugcName:SetName("目前查看："..item)
+    ugcStock:SetName("庫存："..(ugcText(selected,"Availability") or "未知"))
+    ugcStatus:SetName("來源：目前開啟頁面（上架日期未驗證）")
+    for i=1,3 do
+        local name=ugcText(selected,i.."Name")
+        local value=ugcText(selected,i.."Value")
+        ugcTasks[i]:SetName(name and (name.."："..(value or "?")) or ("任務 "..i.."：—"))
+    end
 end
-UGCTab:CreateButton({Name="開啟今日 UGC 資訊面板",Callback=ugcOpen})
-UGCTab:CreateButton({Name="刷新並複製今日 UGC 資料",Callback=function()
-    ugcRefresh()
-    if setclipboard then pcall(setclipboard,ugcLast) end
-    notify("今日 UGC","已刷新，並嘗試複製報告",4)
-end})
+UGCTab:CreateButton({Name="立即刷新今日 UGC",Callback=ugcRefresh})
 task.spawn(function()
     while task.wait(8) do
-        if ugcOverlay and ugcOverlay.Parent and ugcOverlay.Enabled then pcall(ugcRefresh) end
+        if alive ~= false then pcall(ugcRefresh) else break end
     end
 end)
 
