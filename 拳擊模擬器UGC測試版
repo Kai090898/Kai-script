@@ -1233,118 +1233,36 @@ do
     })
 end
 
--- ===== 今日 UGC：直接顯示於卡依 UI 分頁，不建立額外視窗 =====
-UGCTab:CreateSection("今日 UGC｜目前遊戲開啟的獎勵")
-local ugcName=UGCTab:CreateSection("等待偵測今日 UGC")
-local ugcStock=UGCTab:CreateSection("庫存：未知")
-local ugcStatus=UGCTab:CreateSection("請先在遊戲中打開今日 UGC 頁面")
-local ugcTasks={}
-for i=1,3 do ugcTasks[i]=UGCTab:CreateSection("任務 "..i.."：—") end
-local function ugcVisible(obj,pg)
-    while obj and obj~=pg do
-        if obj:IsA("GuiObject") and not obj.Visible then return false end
-        if obj:IsA("ScreenGui") and not obj.Enabled then return false end
-        obj=obj.Parent
-    end
-    return true
-end
-local function ugcText(root,key)
-    local obj=root:FindFirstChild(key,true)
-    if obj and (obj:IsA("TextLabel") or obj:IsA("TextButton")) then return obj.Text end
-    return nil
-end
-local ugcTrackedRoot=nil
-local ugcLastSnapshot=nil
-local ugcLastChange=0
-local function ugcSnapshot(root)
-    local data={item=ugcText(root,"TankName") or ugcText(root,"UGCName") or root.Name,
-        stock=ugcText(root,"Availability") or "未知", tasks={}}
-    for i=1,3 do
-        local name=ugcText(root,i.."Name")
-        local value=ugcText(root,i.."Value")
-        data.tasks[i]=name and (name.."："..(value or "?")) or ("任務 "..i.."：—")
-    end
-    return data
-end
-local function ugcRefresh()
+-- ===== 今日 UGC：快捷開啟遊戲原生任務 UI =====
+UGCTab:CreateSection("今日 UGC｜快速查看遊戲原生任務")
+UGCTab:CreateSection("按下按鈕開啟任務，看完使用遊戲原本的 X 關閉")
+local ugcLastOpened=nil
+local function openUGCQuest()
     local pg=LocalPlayer:FindFirstChild("PlayerGui")
-    if not pg then return end
-    -- 只有在玩家打開任務頁時才切換追蹤對象，避免舊活動搶走焦點
-    local selected=nil
-    for _,root in ipairs(pg:GetChildren()) do
-        if root:IsA("LayerCollector") and root.Enabled then
-            local name=ugcText(root,"TankName") or ugcText(root,"UGCName")
-            local stock=ugcText(root,"Availability")
-            if name and stock and ugcVisible(root,pg) then
-                selected=root
-                break
-            end
-        end
-    end
-    if selected then ugcTrackedRoot=selected end
-    local root=ugcTrackedRoot
-    if root and root.Parent then
-        local fresh=ugcSnapshot(root)
-        local signature=fresh.item.."|"..fresh.stock.."|"..table.concat(fresh.tasks,"|")
-        if not ugcLastSnapshot or ugcLastSnapshot.signature~=signature then
-            fresh.signature=signature
-            ugcLastSnapshot=fresh
-            ugcLastChange=os.clock()
-        end
-    end
-    if not ugcLastSnapshot then
-        ugcName:SetName("目前 UGC：尚未記錄")
-        ugcStock:SetName("庫存：未知")
-        ugcStatus:SetName("請先開啟一次 UGC 任務頁面")
-        for i=1,3 do ugcTasks[i]:SetName("任務 "..i.."：—") end
+    if not pg then notify("今日 UGC","找不到遊戲介面",4);return end
+    -- 優先使用先前玩家打開過的任務頁；未記錄時使用已確認的 SummerQuest
+    local root=ugcLastOpened and ugcLastOpened.Parent and ugcLastOpened
+        or pg:FindFirstChild("SummerQuest")
+    if not root then
+        notify("今日 UGC","尚未找到任務頁，請先使用遊戲的 UGC 按鈕開啟一次",6)
         return
     end
-    local data=ugcLastSnapshot
-    ugcName:SetName("追蹤 UGC："..data.item)
-    ugcStock:SetName("庫存："..data.stock)
-    local opened=root and root.Parent and ugcVisible(root,pg)
-    ugcStatus:SetName(opened and "任務頁開啟中｜持續監看" or
-        ("任務頁已關閉｜保留讀值（"..math.floor(os.clock()-ugcLastChange).."秒未變更）"))
-    for i=1,3 do ugcTasks[i]:SetName(data.tasks[i]) end
+    if root:IsA("ScreenGui") then root.Enabled=true end
+    local main=root:FindFirstChild("Main",true)
+    if main and main:IsA("GuiObject") then main.Visible=true end
+    local visibleAny=false
+    for _,obj in ipairs(root:GetDescendants()) do
+        if obj:IsA("GuiObject") and obj.Visible then visibleAny=true;break end
+    end
+    if not visibleAny then
+        local first=root:FindFirstChildWhichIsA("Frame",true)
+        if first then first.Visible=true end
+    end
+    ugcLastOpened=root
+    notify("今日 UGC","已嘗試開啟遊戲原生任務視窗",4)
 end
-UGCTab:CreateButton({Name="立即刷新今日 UGC",Callback=ugcRefresh})
-UGCTab:CreateButton({Name="UGC 診斷｜複製介面資料",Callback=function()
-    local pg=LocalPlayer:FindFirstChild("PlayerGui")
-    if not pg then notify("UGC 診斷","找不到 PlayerGui",5);return end
-    local lines={"UGC 診斷｜請在遊戲中打開 UGC 任務後按此按鈕"}
-    local count=0
-    for _,root in ipairs(pg:GetChildren()) do
-        if root:IsA("LayerCollector") then
-            local hits={}
-            for _,o in ipairs(root:GetDescendants()) do
-                if (o:IsA("TextLabel") or o:IsA("TextButton")) and
-                    (o.Name=="TankName" or o.Name=="UGCName" or o.Name=="Availability" or
-                     o.Name=="1Name" or o.Name=="1Value" or o.Name=="2Name" or o.Name=="2Value" or
-                     o.Name=="3Name" or o.Name=="3Value") then
-                    table.insert(hits,o.Name.."="..o.Text.." [visible="..tostring(ugcVisible(o,pg)).."]")
-                end
-            end
-            if #hits>0 then
-                count=count+1
-                table.insert(lines,root.Name.." [enabled="..tostring(root.Enabled).."]")
-                for _,hit in ipairs(hits) do table.insert(lines,"  "..hit) end
-            end
-        end
-    end
-    table.insert(lines,"找到的 UGC 資料根數："..count)
-    local report=table.concat(lines,"\n")
-    if setclipboard then
-        local ok=pcall(setclipboard,report)
-        notify("UGC 診斷",ok and "診斷報告已複製，請貼回聊天" or "複製失敗，請查看日誌",6)
-    else notify("UGC 診斷","執行環境不支援剪貼簿，請查看日誌",6) end
-    for line in report:gmatch("[^\n]+") do blog(line) end
-end})
-
-task.spawn(function()
-    while task.wait(8) do
-        if alive ~= false then pcall(ugcRefresh) else break end
-    end
-end)
+UGCTab:CreateButton({Name="開啟 UGC 任務介面",Callback=openUGCQuest})
+UGCTab:CreateSection("目前快捷目標：SummerQuest；若今日任務換介面，需重新確認")
 
 -- ====================================================================
 --  傳送
