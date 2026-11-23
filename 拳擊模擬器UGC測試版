@@ -272,7 +272,7 @@ local PetTab = Window:CreateTab("寵物")
 local EquipTab = Window:CreateTab("裝備")
 local TpTab = Window:CreateTab("傳送")
 local SetTab = Window:CreateTab("設定")
-local UGCTab = Window:CreateTab("每日 UGC")
+local UGCTab = Window:CreateTab("今日 UGC")
 
 local function addToggle(tab, label, key, onChange)
     return tab:CreateToggle({
@@ -1233,49 +1233,131 @@ do
     })
 end
 
--- ===== 每日 UGC（只讀取 PlayerGui，未經驗證的數字標示為介面快照） =====
-UGCTab:CreateSection("UGC 任務與庫存（只讀）")
-local function ugcReport()
-    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+-- ===== 今日 UGC：遊戲 UI 即時監看（只讀） =====
+UGCTab:CreateSection("今日 UGC｜自動刷新，不含倒數")
+local ugcOverlay, ugcText, ugcLast = nil, nil, ""
+local function ugcRead()
+    local pg=LocalPlayer:FindFirstChild("PlayerGui")
     if not pg then return "找不到 PlayerGui" end
-    local names = {"SummerQuest","UGCNextBoss2","UGCVisitsPlaytimeQuest","AxolotlQuest"}
-    local lines = {"UGC 介面資料（可能是快照，請以遊戲實際頁面為準）"}
-    local function label(root, key)
-        local v = root:FindFirstChild(key, true)
-        return v and v:IsA("TextLabel") and v.Text or "-"
+    local roots={"UniqueQuest","UniqueQuest2","SummerQuest","AxolotlQuest","UGCNextBoss2","UGCVisitsPlaytimeQuest"}
+    local function getText(root,key)
+        local o=root:FindFirstChild(key,true)
+        if o and (o:IsA("TextLabel") or o:IsA("TextButton")) then return o.Text end
+        return nil
     end
-    for _,name in ipairs(names) do
-        local root=pg:FindFirstChild(name)
+    local entries={}
+    for _,key in ipairs(roots) do
+        local root=pg:FindFirstChild(key,true)
         if root then
-            local item=label(root,"TankName")
-            if item=="-" then item=label(root,"UGCName") end
-            table.insert(lines, string.format("\\n%s｜%s｜庫存顯示 %s",item,name,label(root,"Availability")))
+            local item=getText(root,"TankName") or getText(root,"UGCName")
+            local stock=getText(root,"Availability")
+            local tasks={}
             for i=1,3 do
-                local n=label(root,i.."Name")
-                local v=label(root,i.."Value")
-                if n~="-" then table.insert(lines,string.format("  %s：%s",n,v)) end
+                local name=getText(root,i.."Name")
+                if name then
+                    table.insert(tasks,"  "..name.."  "..(getText(root,i.."Value") or "?"))
+                end
             end
-            local claimed=root:FindFirstChild("Claimed",true)
-            if claimed and claimed:IsA("GuiObject") then
-                table.insert(lines,"  已領取標記顯示："..tostring(claimed.Visible))
+            if item or stock or #tasks>0 then
+                local badge=root:FindFirstChild("TextLabel",true)
+                local newTag=false
+                for _,o in ipairs(root:GetDescendants()) do
+                    if o:IsA("TextLabel") and o.Text:lower():find("new",1,true) then newTag=true;break end
+                end
+                table.insert(entries,{name=item or key,stock=stock or "未知",tasks=tasks,tag=newTag,key=key})
             end
         end
     end
-    return table.concat(lines,"\\n")
+    local lines={"今日 UGC｜UI 監看","上架時間不固定；不顯示倒數","庫存為遊戲 UI 原始值，隱藏頁面可能尚未更新",""}
+    local foundToday=false
+    for _,e in ipairs(entries) do
+        if e.tag then
+            foundToday=true
+            table.insert(lines,"[NEW 標記候選] "..e.name.."｜"..e.stock)
+            for _,t in ipairs(e.tasks) do table.insert(lines,t) end
+        end
+    end
+    if not foundToday then table.insert(lines,"尚未辨識今日新品（NEW 不代表已驗證上架日期）") end
+    table.insert(lines,"")
+    table.insert(lines,"其他已讀取的 UGC：")
+    for _,e in ipairs(entries) do
+        if not e.tag then
+            table.insert(lines,e.name.."｜庫存 "..e.stock)
+            for _,t in ipairs(e.tasks) do table.insert(lines,t) end
+        end
+    end
+    if #entries==0 then table.insert(lines,"尚未取得 UGC 資料") end
+    return table.concat(lines,"\n")
 end
-local function showUGCReport()
-    local text=ugcReport()
-    if setclipboard then pcall(setclipboard,text) end
-    notify("每日 UGC", "已讀取介面資料並嘗試複製到剪貼簿", 5)
-    -- 透過狀態日誌檢視，避免把大量內容塞進短通知
-    for line in text:gmatch("[^\\n]+") do blog(line) end
+local function ugcRefresh()
+    ugcLast=ugcRead()
+    if ugcText and ugcText.Parent then
+        ugcText.Text=ugcLast
+        local n=1
+        for _ in ugcLast:gmatch("\n") do n=n+1 end
+        ugcText.Size=UDim2.new(1,-14,0,math.max(320,n*18))
+        ugcText.Parent.CanvasSize=UDim2.fromOffset(0,math.max(320,n*18))
+    end
 end
-UGCTab:CreateButton({Name="刷新任務／庫存並複製報告",Callback=showUGCReport})
-UGCTab:CreateButton({Name="查看目前 UGC 摘要",Callback=function()
-    local text=ugcReport()
-    notify("UGC 任務摘要",text:sub(1,800),10)
+local function ugcOpen()
+    if ugcOverlay and ugcOverlay.Parent then ugcOverlay.Enabled=true;ugcRefresh();return end
+    local pg=LocalPlayer:FindFirstChild("PlayerGui")
+    if not pg then return end
+    ugcOverlay=Instance.new("ScreenGui")
+    ugcOverlay.Name="KaiTodayUGCMonitor"
+    ugcOverlay.ResetOnSpawn=false
+    ugcOverlay.DisplayOrder=110
+    ugcOverlay.Parent=pg
+    local panel=Instance.new("Frame")
+    panel.Size=UDim2.fromOffset(440,390)
+    panel.Position=UDim2.new(.5,-220,.5,-195)
+    panel.BackgroundColor3=Color3.fromRGB(24,30,42)
+    panel.Parent=ugcOverlay
+    local close=Instance.new("TextButton")
+    close.Size=UDim2.fromOffset(80,34)
+    close.Position=UDim2.new(1,-88,0,7)
+    close.Text="關閉"
+    close.TextColor3=Color3.new(1,1,1)
+    close.BackgroundColor3=Color3.fromRGB(60,90,130)
+    close.Parent=panel
+    close.MouseButton1Click:Connect(function()ugcOverlay.Enabled=false end)
+    local refresh=Instance.new("TextButton")
+    refresh.Size=UDim2.fromOffset(110,34)
+    refresh.Position=UDim2.fromOffset(8,7)
+    refresh.Text="立即刷新"
+    refresh.TextColor3=Color3.new(1,1,1)
+    refresh.BackgroundColor3=Color3.fromRGB(60,90,130)
+    refresh.Parent=panel
+    refresh.MouseButton1Click:Connect(ugcRefresh)
+    local scroll=Instance.new("ScrollingFrame")
+    scroll.Position=UDim2.fromOffset(8,48)
+    scroll.Size=UDim2.new(1,-16,1,-56)
+    scroll.BackgroundTransparency=1
+    scroll.ScrollBarThickness=6
+    scroll.Parent=panel
+    ugcText=Instance.new("TextLabel")
+    ugcText.BackgroundTransparency=1
+    ugcText.Size=UDim2.new(1,-14,0,320)
+    ugcText.TextXAlignment=Enum.TextXAlignment.Left
+    ugcText.TextYAlignment=Enum.TextYAlignment.Top
+    ugcText.TextWrapped=true
+    ugcText.Font=Enum.Font.Code
+    ugcText.TextSize=14
+    ugcText.TextColor3=Color3.new(1,1,1)
+    ugcText.Parent=scroll
+    ugcRefresh()
+end
+UGCTab:CreateButton({Name="開啟今日 UGC 資訊面板",Callback=ugcOpen})
+UGCTab:CreateButton({Name="刷新並複製今日 UGC 資料",Callback=function()
+    ugcRefresh()
+    if setclipboard then pcall(setclipboard,ugcLast) end
+    notify("今日 UGC","已刷新，並嘗試複製報告",4)
 end})
-UGCTab:CreateSection("提醒：未開啟的 UGC 視窗可能保留舊數值；此版不自動領取。")
+task.spawn(function()
+    while task.wait(8) do
+        if ugcOverlay and ugcOverlay.Parent and ugcOverlay.Enabled then pcall(ugcRefresh) end
+    end
+end)
 
 -- ====================================================================
 --  傳送
