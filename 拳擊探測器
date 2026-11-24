@@ -1,28 +1,62 @@
--- UGC 原生按鈕診斷：只觀察玩家操作
+-- UGC 按鈕觀察器：手動結束，只記錄 UI 操作
 local pg=game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")
-local lines={"UGC 按鈕診斷：請手動開啟、關閉、再次開啟任務"}
+local gui=Instance.new("ScreenGui")
+gui.Name="KaiUGCProbe"
+gui.ResetOnSpawn=false
+gui.DisplayOrder=200
+local old=pg:FindFirstChild(gui.Name)
+if old then old:Destroy() end
+gui.Parent=pg
+local panel=Instance.new("Frame")
+panel.Size=UDim2.fromOffset(260,160)
+panel.Position=UDim2.new(0,12,0.5,-80)
+panel.BackgroundColor3=Color3.fromRGB(28,35,48)
+panel.Parent=gui
+local function label(class,y,h,txt)
+ local o=Instance.new(class)
+ o.Size=UDim2.new(1,-16,0,h)
+ o.Position=UDim2.fromOffset(8,y)
+ o.Text=txt
+ o.TextColor3=Color3.new(1,1,1)
+ o.BackgroundColor3=Color3.fromRGB(48,65,85)
+ o.TextSize=14
+ o.TextWrapped=true
+ o.Parent=panel
+ return o
+end
+local status=label("TextLabel",8,55,"感應中｜請開關 UGC 任務")
+local finish=label("TextButton",70,36,"結束感應並複製")
+local close=label("TextButton",112,36,"關閉感應器")
+local lines={"UGC 原生按鈕觀察報告"}
 local connections={}
-local function log(s)
-    table.insert(lines,s)
-    print(s)
+local running=true
+local function log(t)
+ if not running then return end
+ table.insert(lines,t)
+ status.Text="感應中｜已記錄 "..(#lines-1).." 個事件"
 end
 local function watch(o)
-    if o:IsA("GuiButton") then
-        table.insert(connections,o.Activated:Connect(function()
-            log("點擊："..o:GetFullName())
-        end))
-    end
-    if o:IsA("ScreenGui") then
-        table.insert(connections,o:GetPropertyChangedSignal("Enabled"):Connect(function()
-            log("介面："..o:GetFullName().." Enabled="..tostring(o.Enabled))
-        end))
-    end
+ if o:IsDescendantOf(gui) then return end
+ if o:IsA("GuiButton") then
+  table.insert(connections,o.Activated:Connect(function() log("點擊："..o:GetFullName()) end))
+ elseif o:IsA("ScreenGui") then
+  table.insert(connections,o:GetPropertyChangedSignal("Enabled"):Connect(function() log(o:GetFullName().." Enabled="..tostring(o.Enabled)) end))
+ end
 end
 for _,o in ipairs(pg:GetDescendants()) do watch(o) end
 table.insert(connections,pg.DescendantAdded:Connect(watch))
-print("請在 30 秒內手動開關 UGC 任務兩次")
-task.wait(30)
-for _,c in ipairs(connections) do c:Disconnect() end
-local report=table.concat(lines,"\n")
-print(report)
-if setclipboard then pcall(setclipboard,report) end
+local function stop()
+ running=false
+ for _,c in ipairs(connections) do c:Disconnect() end
+ table.clear(connections)
+end
+finish.Activated:Connect(function()
+ stop()
+ local report=table.concat(lines,"\n")
+ print(report)
+ local ok=false
+ if setclipboard then ok=pcall(setclipboard,report) end
+ status.Text=(ok and "已嘗試複製" or "無法複製，請查看日誌").."｜"..(#lines-1).." 個事件"
+end)
+close.Activated:Connect(function() stop();gui:Destroy() end)
+gui.Destroying:Connect(stop)
