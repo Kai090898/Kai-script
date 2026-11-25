@@ -273,6 +273,7 @@ local EquipTab = Window:CreateTab("裝備")
 local TpTab = Window:CreateTab("傳送")
 local SetTab = Window:CreateTab("設定")
 local UGCTab = Window:CreateTab("今日 UGC")
+local DungeonTab = Window:CreateTab("副本")
 
 local function addToggle(tab, label, key, onChange)
     return tab:CreateToggle({
@@ -1293,7 +1294,8 @@ end
 -- ====================================================================
 --  設定
 -- ====================================================================
-SetTab:CreateButton({Name="拳擊額外腳本",Callback=function()
+DungeonTab:CreateSection("地下城")
+DungeonTab:CreateButton({Name="拳擊額外腳本",Callback=function()
     notify("拳擊額外腳本","地下城腳本（別人的）：請至 GitHub 查看原始檔案；此入口不執行未驗證程式。",8)
 end})
 
