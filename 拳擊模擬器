@@ -272,6 +272,8 @@ local PetTab = Window:CreateTab("寵物")
 local EquipTab = Window:CreateTab("裝備")
 local TpTab = Window:CreateTab("傳送")
 local SetTab = Window:CreateTab("設定")
+local UGCTab = Window:CreateTab("今日 UGC")
+local DungeonTab = Window:CreateTab("副本")
 
 local function addToggle(tab, label, key, onChange)
     return tab:CreateToggle({
@@ -485,12 +487,17 @@ do
         local f = workspace:FindFirstChild("EggVendors")
         if f then
             for _, c in ipairs(f:GetChildren()) do
-                if not table.find(names, c.Name) then
+                if not c.Name:lower():find("robux", 1, true) and not table.find(names, c.Name) then
                     table.insert(names, c.Name)
                 end
             end
         end
-        table.sort(names)
+        table.sort(names, function(a,b)
+            local an=tonumber(a:match("%d+")) or math.huge
+            local bn=tonumber(b:match("%d+")) or math.huge
+            if an~=bn then return an<bn end
+            return a:lower()<b:lower()
+        end)
         if #names == 0 then
             names = {"Forest2", "HalloweenEgg"}
         end
@@ -1227,6 +1234,31 @@ do
     })
 end
 
+-- ===== 今日 UGC：原生按鈕快捷入口 =====
+UGCTab:CreateSection("今日 UGC")
+UGCTab:CreateButton({Name="開啟今日 UGC",Callback=function()
+    local pg=LocalPlayer:FindFirstChild("PlayerGui")
+    local main=pg and pg:FindFirstChild("MainUi")
+    local btn=main and main:FindFirstChild("AxolotlQuest")
+    if not btn or not btn:IsA("GuiButton") then
+        notify("今日 UGC","找不到已確認的原生按鈕，請使用遊戲原本的入口",5)
+        return
+    end
+    local root=pg:FindFirstChild("AxolotlQuest")
+    if root and root:IsA("ScreenGui") and root.Enabled then return end
+    if type(firesignal)~="function" then
+        notify("今日 UGC","目前環境不支援原生按鈕事件，請手動開啟",5)
+        return
+    end
+    local ok=pcall(function() firesignal(btn.Activated) end)
+    if not ok then notify("今日 UGC","無法觸發原生按鈕，請手動開啟",5);return end
+    task.delay(0.5,function()
+        if not (root and root.Parent and root:IsA("ScreenGui") and root.Enabled) then
+            notify("今日 UGC","尚未確認視窗開啟，請使用遊戲原本的入口",5)
+        end
+    end)
+end})
+
 -- ====================================================================
 --  傳送
 -- ====================================================================
@@ -1262,6 +1294,86 @@ end
 -- ====================================================================
 --  設定
 -- ====================================================================
+DungeonTab:CreateSection("地下城")
+DungeonTab:CreateButton({Name="拳擊額外腳本",Callback=function()
+    local ok, err = pcall(function()
+        loadstring(game:HttpGet("https://gist.githubusercontent.com/sausage-food11/f2731fe7224a835579fc830bcb0215fd/raw/6b699943b2dc68a464a38e9bd24fe14fdddedf8a/Punch%2520Simulator"))()
+    end)
+    if not ok then notify("拳擊額外腳本", tostring(err), 8) end
+end})
+do
+    local monitor, autoExit, autoClaim = false, false, false
+    local exited, claimed, announced = false, false, false
+    local function path(root, ...)
+        for _, name in ipairs({...}) do
+            root = root and root:FindFirstChild(name)
+        end
+        return root
+    end
+    local function visible(obj)
+        if not obj then return false end
+        while obj do
+            if obj:IsA("GuiObject") and not obj.Visible then return false end
+            if obj:IsA("ScreenGui") and not obj.Enabled then return false end
+            obj = obj.Parent
+        end
+        return true
+    end
+    local function activate(btn)
+        if not visible(btn) or not btn:IsA("GuiButton") or type(firesignal) ~= "function" then return false end
+        return pcall(function() firesignal(btn.Activated) end)
+    end
+    DungeonTab:CreateToggle({Name="通關偵測",CurrentValue=false,Callback=function(v) monitor=v end})
+    DungeonTab:CreateToggle({Name="通關自動退出",CurrentValue=false,Callback=function(v) autoExit=v end})
+    DungeonTab:CreateToggle({Name="自動領取獎勵",CurrentValue=false,Callback=function(v) autoClaim=v end})
+    local rewardSince, lastReward, stableSince
+    task.spawn(function()
+        while task.wait(0.5) do
+            pcall(function()
+                local pg=LocalPlayer:FindFirstChild("PlayerGui")
+                local frame=path(pg,"DungeonMain","Frame")
+                local wave=path(frame,"Wave","WaveNumber")
+                local left=path(frame,"NumberLeft","Left")
+                local n=wave and tonumber(wave.Text:match("%d+"))
+                local remaining=left and tonumber(left.Text:match("%d+"))
+                if visible(frame) and n and n>=1 and n<51 then
+                    exited, claimed, announced=false,false,false
+                    rewardSince,lastReward,stableSince=nil,nil,nil
+                end
+                if visible(frame) and n==51 and remaining==0 then
+                    if monitor and not announced then
+                        announced=true
+                        notify("副本","第51波，剩餘怪物0",5)
+                    end
+                    if autoExit and not exited then
+                        exited=activate(path(frame,"Exit"))
+                    end
+                end
+                local finish=path(pg,"DungeonFinishUI","Frame")
+                local claim=path(finish,"ClaimButton")
+                if visible(claim) then
+                    local now=os.clock()
+                    rewardSince=rewardSince or now
+                    local parts={}
+                    local rewards=path(finish,"Rewards")
+                    if rewards then
+                        for _, obj in ipairs(rewards:GetDescendants()) do
+                            if obj:IsA("TextLabel") or obj:IsA("TextButton") then table.insert(parts,obj.Text) end
+                        end
+                    end
+                    local snapshot=table.concat(parts,"|")
+                    if snapshot~=lastReward then lastReward=snapshot; stableSince=now end
+                    if autoClaim and not claimed and now-rewardSince>=5 and stableSince and now-stableSince>=2 then
+                        claimed=activate(claim)
+                    end
+                else
+                    rewardSince,lastReward,stableSince=nil,nil,nil
+                end
+            end)
+        end
+    end)
+end
+
 SetTab:CreateSection("效能與雜項")
 do
     local afkConn
