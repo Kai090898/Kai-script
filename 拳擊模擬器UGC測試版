@@ -1233,36 +1233,30 @@ do
     })
 end
 
--- ===== 今日 UGC：快捷開啟遊戲原生任務 UI =====
-UGCTab:CreateSection("今日 UGC｜快速查看遊戲原生任務")
-UGCTab:CreateSection("按下按鈕開啟任務，看完使用遊戲原本的 X 關閉")
-local ugcLastOpened=nil
-local function openUGCQuest()
+-- ===== 今日 UGC：原生按鈕快捷入口 =====
+UGCTab:CreateSection("今日 UGC")
+UGCTab:CreateButton({Name="開啟今日 UGC",Callback=function()
     local pg=LocalPlayer:FindFirstChild("PlayerGui")
-    if not pg then notify("今日 UGC","找不到遊戲介面",4);return end
-    -- 優先使用先前玩家打開過的任務頁；未記錄時使用已確認的 SummerQuest
-    local root=ugcLastOpened and ugcLastOpened.Parent and ugcLastOpened
-        or pg:FindFirstChild("SummerQuest")
-    if not root then
-        notify("今日 UGC","尚未找到任務頁，請先使用遊戲的 UGC 按鈕開啟一次",6)
+    local main=pg and pg:FindFirstChild("MainUi")
+    local btn=main and main:FindFirstChild("AxolotlQuest")
+    if not btn or not btn:IsA("GuiButton") then
+        notify("今日 UGC","找不到已確認的原生按鈕，請使用遊戲原本的入口",5)
         return
     end
-    if root:IsA("ScreenGui") then root.Enabled=true end
-    local main=root:FindFirstChild("Main",true)
-    if main and main:IsA("GuiObject") then main.Visible=true end
-    local visibleAny=false
-    for _,obj in ipairs(root:GetDescendants()) do
-        if obj:IsA("GuiObject") and obj.Visible then visibleAny=true;break end
+    local root=pg:FindFirstChild("AxolotlQuest")
+    if root and root:IsA("ScreenGui") and root.Enabled then return end
+    if type(firesignal)~="function" then
+        notify("今日 UGC","目前環境不支援原生按鈕事件，請手動開啟",5)
+        return
     end
-    if not visibleAny then
-        local first=root:FindFirstChildWhichIsA("Frame",true)
-        if first then first.Visible=true end
-    end
-    ugcLastOpened=root
-    notify("今日 UGC","已嘗試開啟遊戲原生任務視窗",4)
-end
-UGCTab:CreateButton({Name="開啟 UGC 任務介面",Callback=openUGCQuest})
-UGCTab:CreateSection("目前快捷目標：SummerQuest；若今日任務換介面，需重新確認")
+    local ok=pcall(function() firesignal(btn.Activated) end)
+    if not ok then notify("今日 UGC","無法觸發原生按鈕，請手動開啟",5);return end
+    task.delay(0.5,function()
+        if not (root and root.Parent and root:IsA("ScreenGui") and root.Enabled) then
+            notify("今日 UGC","尚未確認視窗開啟，請使用遊戲原本的入口",5)
+        end
+    end)
+end})
 
 -- ====================================================================
 --  傳送
