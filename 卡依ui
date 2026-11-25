@@ -172,6 +172,16 @@ do
     local glassOn = false
     local connections = {}
     local closeCallbacks = {}
+    -- Programmatic control restoration keeps callbacks active without notification spam.
+    local silentThreads = setmetatable({}, {__mode = "k"})
+    local function restoreCallback(cb, ...)
+        local thread = coroutine.running()
+        silentThreads[thread] = (silentThreads[thread] or 0) + 1
+        safe(cb, ...)
+        local depth = silentThreads[thread] - 1
+        silentThreads[thread] = depth > 0 and depth or nil
+    end
+
 
     local function track(conn)
         table.insert(connections, conn)
@@ -203,6 +213,7 @@ do
 
     -- ---------- 通知（滑入、淡入淡出、倒數條） ----------
     function lib:Notify(o)
+        if silentThreads[coroutine.running()] then return end
         if not notifyHolder then
             return
         end
@@ -832,7 +843,7 @@ do
                 function self:Set(v)
                     state = v and true or false
                     render()
-                    safe(o.Callback, state)
+                    restoreCallback(o.Callback, state)
                 end
                 return self
             end
@@ -874,7 +885,7 @@ do
                 end
                 function self:Set(text)
                     box.Text = tostring(text)
-                    safe(o.Callback, box.Text)
+                    restoreCallback(o.Callback, box.Text)
                 end
                 return self
             end
@@ -1022,7 +1033,7 @@ do
                     end
                     render()
                     rebuild()
-                    safe(o.Callback, {current})
+                    restoreCallback(o.Callback, {current})
                 end
 
                 function self:Refresh(newList)
