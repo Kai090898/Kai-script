@@ -1,4 +1,4 @@
--- UGC 按鈕觀察器：手動結束，只記錄 UI 操作
+-- 副本領獎觀察器：只記錄 UI 狀態
 local pg=game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")
 local gui=Instance.new("ScreenGui")
 gui.Name="KaiUGCProbe"
@@ -24,10 +24,10 @@ local function label(class,y,h,txt)
  o.Parent=panel
  return o
 end
-local status=label("TextLabel",8,55,"感應中｜請開關 UGC 任務")
+local status=label("TextLabel",8,55,"感應中｜等待副本結算")
 local finish=label("TextButton",70,36,"結束感應並複製")
 local close=label("TextButton",112,36,"關閉感應器")
-local lines={"UGC 原生按鈕觀察報告"}
+local lines={"副本領獎觀察報告"}
 local connections={}
 local running=true
 local function log(t)
@@ -35,16 +35,32 @@ local function log(t)
  table.insert(lines,t)
  status.Text="感應中｜已記錄 "..(#lines-1).." 個事件"
 end
+local started=os.clock()
+local watched=setmetatable({}, {__mode="k"})
 local function watch(o)
- if o:IsDescendantOf(gui) then return end
- if o:IsA("GuiButton") then
-  table.insert(connections,o.Activated:Connect(function() log("點擊："..o:GetFullName()) end))
- elseif o:IsA("ScreenGui") then
-  table.insert(connections,o:GetPropertyChangedSignal("Enabled"):Connect(function() log(o:GetFullName().." Enabled="..tostring(o.Enabled)) end))
+ if watched[o] or o:IsDescendantOf(gui) then return end
+ local name=o:GetFullName()
+ if not (name:find("DungeonFinishUI",1,true) or name:find("DungeonMain",1,true)) then return end
+ watched[o]=true
+ local function record(t) log(string.format("%.2fs ",os.clock()-started)..o:GetFullName().." "..t) end
+ local function prop(p)
+  local ok,v=pcall(function() return o[p] end)
+  if not ok then return end
+  record(p.."="..tostring(v))
+  table.insert(connections,o:GetPropertyChangedSignal(p):Connect(function() record(p.."="..tostring(o[p])) end))
  end
+ if o:IsA("ScreenGui") then prop("Enabled") end
+ if o:IsA("GuiObject") then prop("Visible") end
+ if o:IsA("GuiButton") then
+  prop("Active");prop("Interactable")
+  table.insert(connections,o.Activated:Connect(function() record("Activated") end))
+  table.insert(connections,o.MouseButton1Click:Connect(function() record("MouseButton1Click") end))
+ end
+ if o:IsA("TextLabel") or o:IsA("TextButton") then prop("Text") end
 end
 for _,o in ipairs(pg:GetDescendants()) do watch(o) end
 table.insert(connections,pg.DescendantAdded:Connect(watch))
+table.insert(connections,pg.DescendantRemoving:Connect(function(o) if watched[o] then log(string.format("%.2fs removed ",os.clock()-started)..o:GetFullName()) end end))
 local function stop()
  running=false
  for _,c in ipairs(connections) do c:Disconnect() end
