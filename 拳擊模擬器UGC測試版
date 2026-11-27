@@ -1303,6 +1303,7 @@ DungeonTab:CreateButton({Name="拳擊額外腳本",Callback=function()
 end})
 do
     local monitor, autoExit, autoClaim = false, false, false
+    local autoRespawn, missingSince, respawned = false, nil, false
     local exited, claimed, announced = false, false, false
     local function path(root, ...)
         for _, name in ipairs({...}) do
@@ -1326,6 +1327,7 @@ do
     DungeonTab:CreateToggle({Name="通關偵測",CurrentValue=false,Callback=function(v) monitor=v end})
     DungeonTab:CreateToggle({Name="通關自動退出",CurrentValue=false,Callback=function(v) autoExit=v end})
     DungeonTab:CreateToggle({Name="自動領取獎勵",CurrentValue=false,Callback=function(v) autoClaim=v end})
+    DungeonTab:CreateToggle({Name="退出按鈕消失時自動重生",CurrentValue=false,Callback=function(v) autoRespawn=v; missingSince=nil end})
     local rewardSince, lastReward, stableSince
     task.spawn(function()
         while task.wait(0.5) do
@@ -1338,6 +1340,7 @@ do
                 local remaining=left and tonumber(left.Text:match("%d+"))
                 if visible(frame) and n and n>=1 and n<51 then
                     exited, claimed, announced=false,false,false
+                    missingSince,respawned=nil,false
                     rewardSince,lastReward,stableSince=nil,nil,nil
                 end
                 if visible(frame) and n==51 and remaining==0 then
@@ -1345,9 +1348,25 @@ do
                         announced=true
                         notify("副本","第51波，剩餘怪物0",5)
                     end
+                    local exitButton=path(frame,"Exit")
                     if autoExit and not exited then
-                        exited=activate(path(frame,"Exit"))
+                        exited=activate(exitButton)
                     end
+                    if autoExit and autoRespawn and not respawned and not visible(exitButton) then
+                        missingSince=missingSince or os.clock()
+                        if os.clock()-missingSince>=10 then
+                            local humanoid=LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+                            if humanoid and humanoid.Health>0 then
+                                respawned=true
+                                humanoid.Health=0
+                                notify("副本","退出按鈕消失，已嘗試重生",5)
+                            end
+                        end
+                    else
+                        missingSince=nil
+                    end
+                else
+                    missingSince=nil
                 end
                 local finish=path(pg,"DungeonFinishUI","Frame")
                 local claim=path(finish,"ClaimButton")
