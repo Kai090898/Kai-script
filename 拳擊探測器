@@ -24,10 +24,10 @@ local function label(class,y,h,txt)
  o.Parent=panel
  return o
 end
-local status=label("TextLabel",8,55,"感應中｜等待副本結算")
+local status=label("TextLabel",8,55,"感應中｜觀察怪物及位置")
 local finish=label("TextButton",70,36,"結束感應並複製")
 local close=label("TextButton",112,36,"關閉感應器")
-local lines={"副本領獎觀察報告"}
+local lines={"副本三層觀察報告"}
 local connections={}
 local running=true
 local function log(t)
@@ -61,6 +61,67 @@ end
 for _,o in ipairs(pg:GetDescendants()) do watch(o) end
 table.insert(connections,pg.DescendantAdded:Connect(watch))
 table.insert(connections,pg.DescendantRemoving:Connect(function(o) if watched[o] then log(string.format("%.2fs removed ",os.clock()-started)..o:GetFullName()) end end))
+-- Read-only world observations, sampled once per second.
+local player=game:GetService("Players").LocalPlayer
+local previous={}
+local lastPosition
+local function timed(t) log(string.format("%.2fs ",os.clock()-started)..t) end
+local function attributes(o)
+ local a={}
+ for k,v in pairs(o:GetAttributes()) do
+  if k:lower():find("dungeon") or k:lower():find("wave") or k:lower():find("enemy") then
+   table.insert(a,k.."="..tostring(v))
+  end
+ end
+ table.sort(a)
+ return table.concat(a,",")
+end
+local lastAttrs=""
+local lastWorld
+local function sample()
+ local char=player.Character
+ local root=char and char:FindFirstChild("HumanoidRootPart")
+ if root then
+  local p=root.Position
+  if not lastPosition or (p-lastPosition).Magnitude>=10 then
+   timed(string.format("角色位置 %.1f %.1f %.1f",p.X,p.Y,p.Z))
+   lastPosition=p
+  end
+ end
+ local attrs=attributes(player).." | "..(char and attributes(char) or "").." | "..attributes(workspace)
+ if attrs~=lastAttrs then timed("副本相關屬性 "..attrs);lastAttrs=attrs end
+ local current={}
+ local groups={}
+ for _,o in ipairs(workspace:GetDescendants()) do
+  if o:IsA("Humanoid") and o.Parent and o.Parent:IsA("Model") and not game:GetService("Players"):GetPlayerFromCharacter(o.Parent) then
+   local m=o.Parent
+   local p=m:FindFirstChild("HumanoidRootPart") or m.PrimaryPart
+   if p and root and (p.Position-root.Position).Magnitude<=500 then
+    local pos=p.Position
+    local key=m.Parent:GetFullName().."/"..m.Name
+    local g=groups[key] or {alive=0,dead=0,moving=0}
+    groups[key]=g
+    if o.Health>0 then g.alive+=1 else g.dead+=1 end
+    local old=previous[m]
+    if old and (pos-old).Magnitude>0.5 then g.moving+=1 end
+    current[m]=pos
+   end
+  end
+ end
+ previous=current
+ local rows={}
+ for k,g in pairs(groups) do table.insert(rows,k.." alive="..g.alive.." dead="..g.dead.." moving="..g.moving) end
+ table.sort(rows)
+ local snapshot=table.concat(rows," | ")
+ if snapshot~=lastWorld then timed("附近NPC候選 "..(snapshot~="" and snapshot or "無"));lastWorld=snapshot end
+end
+task.spawn(function()
+ while running do
+  local ok,err=pcall(sample)
+  if not ok then timed("取樣錯誤 "..tostring(err));break end
+  task.wait(1)
+ end
+end)
 local function stop()
  running=false
  for _,c in ipairs(connections) do c:Disconnect() end
