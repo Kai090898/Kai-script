@@ -1364,7 +1364,22 @@ do
                     local snapshot=table.concat(parts,"|")
                     if snapshot~=lastReward then lastReward=snapshot; stableSince=now end
                     if autoClaim and not claimed and now-rewardSince>=5 and stableSince and now-stableSince>=2 then
-                        claimed=activate(claim)
+                        claimed=true
+                        if type(firesignal) == "function" then
+                            pcall(function() firesignal(claim.Activated) end)
+                            task.delay(0.8,function()
+                                if autoClaim and visible(claim) and claim.Active then
+                                    pcall(function() firesignal(claim.MouseButton1Click) end)
+                                end
+                                task.delay(1,function()
+                                    if visible(claim) then
+                                        notify("副本","領獎視窗仍開啟，請手動領取",5)
+                                    end
+                                end)
+                            end)
+                        else
+                            notify("副本","目前環境不支援按鈕事件，請手動領取",5)
+                        end
                     end
                 else
                     rewardSince,lastReward,stableSince=nil,nil,nil
