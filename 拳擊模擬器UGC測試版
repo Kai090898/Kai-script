@@ -1365,21 +1365,20 @@ do
                     if snapshot~=lastReward then lastReward=snapshot; stableSince=now end
                     if autoClaim and not claimed and now-rewardSince>=5 and stableSince and now-stableSince>=2 then
                         claimed=true
-                        if type(firesignal) == "function" then
-                            pcall(function() firesignal(claim.Activated) end)
-                            task.delay(0.8,function()
-                                if autoClaim and visible(claim) and claim.Active then
-                                    pcall(function() firesignal(claim.MouseButton1Click) end)
-                                end
-                                task.delay(1,function()
-                                    if visible(claim) then
-                                        notify("副本","領獎視窗仍開啟，請手動領取",5)
-                                    end
-                                end)
-                            end)
-                        else
-                            notify("副本","目前環境不支援按鈕事件，請手動領取",5)
-                        end
+                        local ok, err=pcall(function()
+                            local vim=game:GetService("VirtualInputManager")
+                            local center=claim.AbsolutePosition+claim.AbsoluteSize/2
+                            local inset=game:GetService("GuiService"):GetGuiInset()
+                            local screen=claim:FindFirstAncestorWhichIsA("ScreenGui")
+                            if screen and not screen.IgnoreGuiInset then center=center+inset end
+                            vim:SendMouseButtonEvent(center.X,center.Y,0,true,game,0)
+                            task.wait(0.12)
+                            vim:SendMouseButtonEvent(center.X,center.Y,0,false,game,0)
+                        end)
+                        if not ok then notify("副本","畫面點擊失敗："..tostring(err),5) end
+                        task.delay(2,function()
+                            if visible(claim) then notify("副本","領獎視窗仍開啟，請手動領取",5) end
+                        end)
                     end
                 else
                     rewardSince,lastReward,stableSince=nil,nil,nil
