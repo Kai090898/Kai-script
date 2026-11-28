@@ -1416,21 +1416,8 @@ do
                 local claim=path(finish,"ClaimButton")
                 if visible(claim) then
                     if not rewardSince then claimed=false; claimDebug("已偵測領獎畫面") end
-                    local now=os.clock()
-                    rewardSince=rewardSince or now
-                    local parts={}
-                    local rewards=path(finish,"Rewards")
-                    if rewards then
-                        for _, obj in ipairs(rewards:GetDescendants()) do
-                            if obj:IsA("TextLabel") or obj:IsA("TextButton") then table.insert(parts,obj.Text) end
-                        end
-                    end
-                    local snapshot=table.concat(parts,"|")
-                    if snapshot~=lastReward then lastReward=snapshot; stableSince=now end
-                    if autoClaim and not claimed and (now-rewardSince<5 or not stableSince or now-stableSince<2) then
-                        claimDebug("等待結算5秒及獎勵穩定2秒")
-                    end
-                    if autoClaim and not claimed and now-rewardSince>=5 and stableSince and now-stableSince>=2 then
+                    rewardSince=rewardSince or os.clock()
+                    if autoClaim and not claimed and claim:IsA("GuiButton") and claim.Active and claim.Interactable and claim.AbsoluteSize.X>0 and claim.AbsoluteSize.Y>0 then
                         claimDebug("開始執行座標點擊")
                         claimed=true
                         local ok, err=pcall(function()
