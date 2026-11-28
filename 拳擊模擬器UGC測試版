@@ -1303,8 +1303,34 @@ DungeonTab:CreateButton({Name="拳擊額外腳本",Callback=function()
 end})
 do
     local monitor, autoExit, autoClaim = false, false, false
-    local autoRespawn, missingSince, respawned = false, nil, false
+    local autoRespawn, respawned = false, false
     local exited, claimed, announced = false, false, false
+    local completed, quietSince, lastSample = false, nil, 0
+    local previous, lastCount = {}, nil
+    local waitSeconds = 10
+    local function inArena(p)
+        return p.X>=-50 and p.X<=150 and p.Y>=400 and p.Y<=550 and p.Z>=950 and p.Z<=1150
+    end
+    local function observe()
+        local current, count, activity = {}, 0, false
+        local dungeon=workspace:FindFirstChild("BreakableParts")
+        dungeon=dungeon and dungeon:FindFirstChild("Dungeon")
+        local function check(m)
+            if not m:IsA("Model") or game:GetService("Players"):GetPlayerFromCharacter(m) then return end
+            local h=m:FindFirstChildOfClass("Humanoid")
+            local p=m:FindFirstChild("HumanoidRootPart") or m.PrimaryPart
+            if h and h.Health>0 and p and inArena(p.Position) then
+                count+=1
+                current[m]=p.Position
+                if not previous[m] or (previous[m]-p.Position).Magnitude>0.5 then activity=true end
+            end
+        end
+        for _,m in ipairs(workspace:GetChildren()) do check(m) end
+        if dungeon then for _,m in ipairs(dungeon:GetDescendants()) do check(m) end end
+        if lastCount~=count then activity=true end
+        previous,lastCount=current,count
+        return activity
+    end
     local function path(root, ...)
         for _, name in ipairs({...}) do
             root = root and root:FindFirstChild(name)
@@ -1312,7 +1338,7 @@ do
         return root
     end
     local function visible(obj)
-        if not obj then return false end
+        if not obj or not obj:IsDescendantOf(game) then return false end
         while obj do
             if obj:IsA("GuiObject") and not obj.Visible then return false end
             if obj:IsA("ScreenGui") and not obj.Enabled then return false end
@@ -1327,7 +1353,7 @@ do
     DungeonTab:CreateToggle({Name="通關偵測",CurrentValue=false,Callback=function(v) monitor=v end})
     DungeonTab:CreateToggle({Name="通關自動退出",CurrentValue=false,Callback=function(v) autoExit=v end})
     DungeonTab:CreateToggle({Name="自動領取獎勵",CurrentValue=false,Callback=function(v) autoClaim=v end})
-    DungeonTab:CreateToggle({Name="退出按鈕消失時自動重生",CurrentValue=false,Callback=function(v) autoRespawn=v; missingSince=nil end})
+    DungeonTab:CreateToggle({Name="三層備援重生保護",CurrentValue=false,Callback=function(v) autoRespawn=v; quietSince=nil end})
     local rewardSince, lastReward, stableSince
     task.spawn(function()
         while task.wait(0.5) do
@@ -1338,37 +1364,47 @@ do
                 local left=path(frame,"NumberLeft","Left")
                 local n=wave and tonumber(wave.Text:match("%d+"))
                 local remaining=left and tonumber(left.Text:match("%d+"))
-                if visible(frame) and n and n>=1 and n<51 then
+                local finish=path(pg,"DungeonFinishUI","Frame")
+                local root=LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+                local inside=root and inArena(root.Position)
+                local now=os.clock()
+                if visible(finish) or (root and not inside) then
+                    completed,quietSince=false,nil
+                    previous,lastCount={},nil
+                elseif inside and visible(frame) and n and n>=1 and n<51 then
                     exited, claimed, announced=false,false,false
-                    missingSince,respawned=nil,false
+                    completed,respawned,quietSince=false,false,nil
+                    previous,lastCount={},nil
                     rewardSince,lastReward,stableSince=nil,nil,nil
                 end
-                if visible(frame) and n==51 and remaining==0 then
+                if inside and not visible(finish) and visible(frame) and n==51 and remaining==0 then
+                    completed=true
                     if monitor and not announced then
                         announced=true
                         notify("副本","第51波，剩餘怪物0",5)
                     end
-                    local exitButton=path(frame,"Exit")
                     if autoExit and not exited then
-                        exited=activate(exitButton)
+                        exited=activate(path(frame,"Exit"))
                     end
-                    if autoExit and autoRespawn and not respawned and not visible(exitButton) then
-                        missingSince=missingSince or os.clock()
-                        if os.clock()-missingSince>=10 then
+                end
+                if completed and inside and not visible(finish) and autoExit and autoRespawn and not respawned then
+                    if now-lastSample>=1 then
+                        lastSample=now
+                        local activity=observe()
+                        if activity or not quietSince then quietSince=now end
+                        if now-quietSince>=waitSeconds then
                             local humanoid=LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
                             if humanoid and humanoid.Health>0 then
                                 respawned=true
                                 humanoid.Health=0
-                                notify("副本","退出按鈕消失，已嘗試重生",5)
+                                notify("副本","通關後持續無怪物活動，已嘗試重生",5)
                             end
                         end
-                    else
-                        missingSince=nil
                     end
                 else
-                    missingSince=nil
+                    quietSince=nil
+                    previous,lastCount={},nil
                 end
-                local finish=path(pg,"DungeonFinishUI","Frame")
                 local claim=path(finish,"ClaimButton")
                 if visible(claim) then
                     local now=os.clock()
