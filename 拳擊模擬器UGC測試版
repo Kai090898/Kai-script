@@ -1355,9 +1355,17 @@ do
     DungeonTab:CreateToggle({Name="自動領取獎勵",CurrentValue=false,Callback=function(v) autoClaim=v end})
     DungeonTab:CreateToggle({Name="三層備援重生保護",CurrentValue=false,Callback=function(v) autoRespawn=v; quietSince=nil end})
     local rewardSince, lastReward, stableSince
+    local debugState, lastError
+    local function claimDebug(msg)
+        if autoClaim and debugState~=msg then
+            debugState=msg
+            print("[領獎除錯] "..msg)
+            pcall(notify,"領獎除錯",msg,5)
+        end
+    end
     task.spawn(function()
         while task.wait(0.5) do
-            pcall(function()
+            local loopOk, loopErr=pcall(function()
                 local pg=LocalPlayer:FindFirstChild("PlayerGui")
                 local frame=path(pg,"DungeonMain","Frame")
                 local wave=path(frame,"Wave","WaveNumber")
@@ -1407,6 +1415,7 @@ do
                 end
                 local claim=path(finish,"ClaimButton")
                 if visible(claim) then
+                    if not rewardSince then claimed=false; claimDebug("已偵測領獎畫面") end
                     local now=os.clock()
                     rewardSince=rewardSince or now
                     local parts={}
@@ -1418,7 +1427,11 @@ do
                     end
                     local snapshot=table.concat(parts,"|")
                     if snapshot~=lastReward then lastReward=snapshot; stableSince=now end
+                    if autoClaim and not claimed and (now-rewardSince<5 or not stableSince or now-stableSince<2) then
+                        claimDebug("等待結算5秒及獎勵穩定2秒")
+                    end
                     if autoClaim and not claimed and now-rewardSince>=5 and stableSince and now-stableSince>=2 then
+                        claimDebug("開始執行座標點擊")
                         claimed=true
                         local ok, err=pcall(function()
                             local vim=game:GetService("VirtualInputManager")
@@ -1430,15 +1443,20 @@ do
                             task.wait(0.12)
                             vim:SendMouseButtonEvent(center.X,center.Y,0,false,game,0)
                         end)
-                        if not ok then notify("副本","畫面點擊失敗："..tostring(err),5) end
+                        if not ok then claimDebug("畫面點擊失敗："..tostring(err)) else claimDebug("點擊指令已送出，等待確認") end
                         task.delay(2,function()
-                            if visible(claim) then notify("副本","領獎視窗仍開啟，請手動領取",5) end
+                            if visible(claim) then claimDebug("領獎視窗仍開啟，請手動領取") else claimDebug("領獎視窗已關閉（不代表獎勵已入帳）") end
                         end)
                     end
                 else
+                    if autoClaim and visible(finish) then claimDebug("結算畫面已開啟，但領獎按鈕不可見") elseif not visible(finish) then debugState=nil end
                     rewardSince,lastReward,stableSince=nil,nil,nil
                 end
             end)
+            if not loopOk and autoClaim and lastError~=tostring(loopErr) then
+                lastError=tostring(loopErr)
+                claimDebug("副本監控錯誤："..lastError)
+            elseif loopOk then lastError=nil end
         end
     end)
 end
